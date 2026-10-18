@@ -1,0 +1,19 @@
+[package]
+name = "envwrap"
+version = "0.1.0"
+edition = "2024"
+description = "Run commands under a declared, sanitized environment; export/import/validate it"
+license = "MIT"
+
+[lib]
+name = "envwrap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "envwrap"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
