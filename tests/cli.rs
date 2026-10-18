@@ -391,3 +391,79 @@ fn wrap_unset_beats_ambient_and_declared() {
     let o = run(c, None);
     assert_eq!(stdout(&o), "unset");
 }
+
+#[test]
+fn check_probes_only_the_effective_proxy() {
+    // http_proxy shadows HTTP_PROXY, so only 127.0.0.1:1 is probed.
+    let plan = "http_proxy=http://127.0.0.1:1\nHTTP_PROXY=https://proxy.example:3128\n";
+    let mut c = bin();
+    c.args(["check", "--proxy-timeout-ms", "50"]);
+    let o = run(c, Some(plan));
+    let err = stderr(&o);
+    assert!(err.contains("unreachable_proxy"));
+    assert!(err.contains("http_proxy:"), "{err}");
+    assert!(!err.contains("proxy.example"), "{err}");
+    assert!(err.contains("mirror_conflict"));
+}
+
+#[test]
+fn check_all_proxy_only_when_no_scheme_specific() {
+    let mut c = bin();
+    c.args(["check", "--proxy-timeout-ms", "50"]);
+    let o = run(c, Some("ALL_PROXY=http://127.0.0.1:1\n"));
+    assert_eq!(o.status.code(), Some(3));
+    assert!(stderr(&o).contains("ALL_PROXY"));
+
+    let mut c = bin();
+    c.args(["check", "--proxy-timeout-ms", "50"]);
+    let o = run(
+        c,
+        Some("ALL_PROXY=http://127.0.0.1:1\nHTTPS_PROXY=http://127.0.0.1:2\n"),
+    );
+    // Only the scheme-specific one is probed.
+    assert_eq!(o.status.code(), Some(3));
+    assert!(stderr(&o).contains("HTTPS_PROXY"));
+    assert!(!stderr(&o).contains("ALL_PROXY:"));
+}
+
+#[test]
+fn check_no_proxy_wildcard_warns() {
+    let mut c = bin();
+    c.args(["check", "--proxy-timeout-ms", "50"]);
+    let o = run(c, Some("HTTPS_PROXY=http://127.0.0.1:1\nNO_PROXY=*\n"));
+    assert!(
+        stderr(&o).contains("no_proxy_bypasses_all"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn check_invalid_port_is_bad_proxy_url() {
+    let mut c = bin();
+    c.args(["check", "--proxy-timeout-ms", "50"]);
+    let o = run(c, Some("HTTPS_PROXY=http://h:\n"));
+    assert_eq!(o.status.code(), Some(3));
+    assert!(stderr(&o).contains("bad_proxy_url"));
+}
+
+#[test]
+fn export_redacts_empty_userinfo() {
+    let mut c = bin();
+    c.args(["export", "--redact"]);
+    let o = run(c, Some("HTTPS_PROXY=https://@h:1\n"));
+    assert_eq!(stdout(&o), "HTTPS_PROXY='https://<redacted>@h:1'\n");
+}
+
+#[test]
+fn export_redacts_ipv6_proxy() {
+    let mut c = bin();
+    c.args(["export", "--redact"]);
+    let o = run(c, Some("https_proxy=http://u:p@[::1]:3128/x?a=1\n"));
+    assert_eq!(
+        stdout(&o),
+        "https_proxy='http://<redacted>@[::1]:3128'\n",
+        "{}",
+        stderr(&o)
+    );
+}

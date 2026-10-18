@@ -526,30 +526,94 @@ fn cmd_check(tokens: &[String], ambient: &Env) -> Result<i32, i32> {
         }
     }
 
-    // Proxy preflight.
+    // NO_PROXY semantics: a wildcard disables every configured proxy.
+    let has_proxy = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .iter()
+    .any(|n| get(n).is_some_and(|v| !v.is_empty()));
+    // Lowercase wins over uppercase, matching the reference checker.
+    let no_proxy_raw = get("no_proxy")
+        .or_else(|| get("NO_PROXY"))
+        .filter(|v| !v.trim().is_empty());
+    if let (Some(raw), true) = (&no_proxy_raw, has_proxy) {
+        let rules = crate::proxy::parse_no_proxy(raw);
+        if rules.contains(&crate::proxy::NoProxyRule::All) {
+            pr.push(
+                "no_proxy_bypasses_all",
+                Severity::Warning,
+                "NO_PROXY",
+                "NO_PROXY is '*' while a proxy is configured; every request bypasses it",
+            );
+        }
+        let kept = rules.len();
+        let listed = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .count();
+        if listed > kept {
+            pr.push(
+                "no_proxy_invalid_rule",
+                Severity::Warning,
+                "NO_PROXY",
+                format!(
+                    "{} entr(ies) in NO_PROXY were not understood",
+                    listed - kept
+                ),
+            );
+        }
+    }
+
+    // Proxy preflight. Only the *effective* variable per scheme is probed:
+    // lowercase wins over uppercase, and ALL_PROXY applies only where no
+    // scheme-specific proxy exists. Probing shadowed variables would report
+    // failures no client would ever hit.
     let timeout_ms = opts.proxy_timeout_ms.unwrap_or(300);
     if !opts.no_proxy_check {
-        for name in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "ALL_PROXY",
-            "all_proxy",
-        ] {
-            let Some(value) = get(name) else { continue };
-            if value.is_empty() {
-                continue;
+        let pick = |lower: &str, upper: &str| -> Option<(String, String)> {
+            match (
+                get(lower).filter(|v| !v.trim().is_empty()),
+                get(upper).filter(|v| !v.trim().is_empty()),
+            ) {
+                // A conflict is already reported by the mirror pass above.
+                (Some(l), Some(_)) => Some((lower.to_string(), l)),
+                (Some(l), None) => Some((lower.to_string(), l)),
+                (None, Some(u)) => Some((upper.to_string(), u)),
+                (None, None) => None,
             }
+        };
+        let http = pick("http_proxy", "HTTP_PROXY");
+        let https = pick("https_proxy", "HTTPS_PROXY");
+        let all = pick("all_proxy", "ALL_PROXY");
+        // ALL_PROXY only takes effect when no scheme-specific proxy is set.
+        let fallback = if http.is_none() && https.is_none() {
+            all.clone()
+        } else {
+            None
+        };
+
+        let mut targets: Vec<(String, String)> = Vec::new();
+        targets.extend(http);
+        targets.extend(https);
+        targets.extend(fallback);
+
+        for (name, value) in targets {
             match crate::proxy::parse_proxy_url(&value) {
                 Err(reason) => pr.push(
                     "bad_proxy_url",
                     Severity::Error,
-                    name,
+                    name.clone(),
                     format!("invalid proxy URL: {reason}"),
                 ),
                 Ok(parts) => {
                     if parts.scheme == "socks4" || parts.scheme == "socks4a" {
+                        // SOCKS4 needs a handshake; a TCP connect proves nothing.
                         pr.counts.proxy_checks += 1;
                         continue;
                     }
@@ -559,7 +623,7 @@ fn cmd_check(tokens: &[String], ambient: &Env) -> Result<i32, i32> {
                     let display = if opts.redact {
                         crate::proxy::redact_proxy(&value)
                     } else {
-                        format!("{}:{port}", parts.host)
+                        format!("{}:{port}", crate::proxy::display_host(&parts.host))
                     };
                     match probe(&parts.host, port, timeout_ms) {
                         Ok(()) => pr.counts.proxy_checks += 1,
@@ -592,7 +656,6 @@ fn trim_slash(s: &str) -> &str {
 /// TCP-connect to `host:port` under one overall deadline.
 fn probe(host: &str, port: u16, timeout_ms: u64) -> Result<(), String> {
     use std::net::{TcpStream, ToSocketAddrs};
-    let host = host.trim_start_matches('[').trim_end_matches(']');
     let addrs = (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("{:?}", e.kind()))?;
