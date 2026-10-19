@@ -11,7 +11,7 @@ envwrap git fetch
 
 `envwrap PROGRAM [ARGS...]` 启动 PATH 中的任意程序。**Claude、Codex、agy 都不是 envwrap 子命令，没有专用分支。** envwrap 不代为安装应用、不创建独立 HOME、不替换账号配置；仅增加明确的网络路径和一组一致的 Linux 容器身份接口。
 
-当前正式版本 **0.3.0**。支持通用入口、SOCKS5h 域名解析和独立环境/网络验收。[crates.io](https://crates.io/crates/envwrap) · [GitHub Release](https://github.com/jacek4yang/envwrap/releases/tag/v0.3.0)。历史 `v0.3.0-rc.1` 保持不变，其命令面与当前版本不同。
+当前正式版本 **0.3.0**。支持通用入口、SOCKS5h 域名解析和独立环境/网络验收。[GitHub Release](https://github.com/jacek4yang/envwrap/releases/tag/v0.3.0) 提供源码与二进制；[crates.io 收录状态](https://crates.io/crates/envwrap) 独立于 GitHub 发布，未收录时使用下面的 Git 安装方式。历史 `v0.3.0-rc.1` 保持不变。
 
 ## 文档导航
 
@@ -60,10 +60,10 @@ locale -a
 
 ## 2. 安装
 
-通过 crates.io 安装：
+直接从正式 Git 标签安装，不依赖 envwrap 已被 crates.io 收录：
 
 ```sh
-cargo install envwrap --version 0.3.0 --locked
+cargo install --git https://github.com/jacek4yang/envwrap --tag v0.3.0 --locked
 hash -r
 command -v envwrap
 envwrap --version
@@ -76,6 +76,13 @@ envwrap --version
 ```sh
 cargo install --path . --locked
 ```
+
+仅当 crates.io 已收录此版本时，也可执行：
+
+```sh
+cargo install envwrap --version 0.3.0 --locked
+```
+
 
 也可以从 [GitHub Release](https://github.com/jacek4yang/envwrap/releases/tag/v0.3.0) 下载二进制与 `SHA256SUMS`。GNU 二进制的 libc 要求以该包的 `BUILD-INFO.json` 为准；之前的 RC 包最高 GLIBC 符号需求为 2.39，不能当作通用静态二进制。仓库和发布资产公开可读。
 
