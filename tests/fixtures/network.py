@@ -57,7 +57,11 @@ def answer(query, internal=False):
     while query[end]:
         end += query[end] + 1
     end += 5
+    kind = struct.unpack('!H', query[end - 4:end - 2])[0]
+    missing = (query[12:19] == b'\x06v4only' and kind == 28) or (query[12:19] == b'\x06v6only' and kind == 1)
     count = 4093 if query[12:17] == b'\x04huge' else 80 if query[12:18] == b'\x05large' else 1
+    if missing:
+        count = 0
     opt = query[end:] if query[10:12] == b'\x00\x01' else b''
     # Omit OPT for the near-65535 response, so it is a legal TCP DNS frame.
     if count == 4093:
@@ -65,7 +69,8 @@ def answer(query, internal=False):
     result = query[:2] + struct.pack('!HHHHH', 0x8180, 1, count, 0, bool(opt)) + query[12:end]
     for index in range(count):
         ip = f'198.51.100.{index % 254 + 1 if count > 1 else 124 if internal else 123}'
-        result += b'\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04' + socket.inet_aton(ip)
+        packed = socket.inet_pton(socket.AF_INET6, '2001:db8::123') if kind == 28 else socket.inet_aton(ip)
+        result += b'\xc0\x0c' + struct.pack('!HHIH', 28 if kind == 28 else 1, 1, 60, len(packed)) + packed
     return result + opt
 
 
@@ -131,6 +136,40 @@ proxy = socket.socket()
 proxy.bind(('127.0.0.1', 0))
 proxy.listen()
 
+# Distinct real services ensure domain routing cannot accidentally collapse two
+# hostnames to the same destination. These never resolve or connect externally.
+domain_services = {}
+for hostname, body in [('one.example', b'first origin'), ('two.example', b'second origin')]:
+    listener = socket.socket()
+    listener.bind(('127.0.0.1', 0))
+    listener.listen()
+    domain_services[hostname] = listener.getsockname()
+    services.append(listener)
+
+    def httpserve(listener=listener, body=body):
+        while True:
+            client, _ = listener.accept()
+            def respond(client=client, body=body):
+                with client:
+                    request = b''
+                    while not request.endswith(b'\r\n\r\n'):
+                        request += exact(client, 1)
+                    client.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body)
+            spawn(respond)
+    spawn(httpserve)
+
+def relay_service(client, destination):
+    with socket.create_connection(destination, timeout=3) as origin:
+        def forward():
+            while data := client.recv(65536):
+                origin.sendall(data)
+            origin.shutdown(socket.SHUT_WR)
+        thread = spawn(forward)
+        while data := origin.recv(65536):
+            client.sendall(data)
+        client.shutdown(socket.SHUT_WR)
+        thread.join(3)
+
 with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
     host_identity = {path: pathlib.Path(path).read_bytes()
                      for path in ['/etc/machine-id', '/etc/localtime', '/proc/sys/kernel/hostname']}
@@ -176,6 +215,9 @@ with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
                         prefix = b'HTTP/1.1 200 OK\r\n\r\n'
                     else:
                         assert exact(stream, 3) == b'\x05\x01\x02'
+                        if scheme == 'socks5h' and failed.is_set():
+                            stream.sendall(b'\x05\xff')
+                            return
                         stream.sendall(b'\x05\x02')
                         version, size = exact(stream, 2)
                         assert version == 1 and exact(stream, size) == b'private-user'
@@ -183,19 +225,30 @@ with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
                         assert exact(stream, size) == b'private-password'
                         stream.sendall(b'\x01\x00')
                         version, command, reserved, kind = exact(stream, 4)
-                        assert (version, command, reserved) == (5, 1, 0) and kind in [1, 4]
-                        ip = socket.inet_ntop(socket.AF_INET if kind == 1 else socket.AF_INET6, exact(stream, 4 if kind == 1 else 16))
+                        assert (version, command, reserved) == (5, 1, 0) and kind in [1, 3, 4]
+                        if kind == 3:
+                            ip = exact(stream, exact(stream, 1)[0]).decode('ascii')
+                        else:
+                            ip = socket.inet_ntop(socket.AF_INET if kind == 1 else socket.AF_INET6, exact(stream, 4 if kind == 1 else 16))
                         port = struct.unpack('!H', exact(stream, 2))[0]
                         prefix = b'\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x01'
                     proxy_targets.append((ip, port))
-                    assert ip in ['203.0.113.9', '2001:db8::9', '2001:db8::53'], (ip, port)
-                    if failed.is_set() or port == 446:
+                    assert ip in ['203.0.113.9', '2001:db8::9', '2001:db8::53', 'api64.ipify.org', 'one.example', 'two.example', 'missing.example'], (ip, port)
+                    if failed.is_set() or port == 446 or ip == 'missing.example':
                         if port == 446:
                             time.sleep(.1)
                         stream.sendall(b'HTTP/1.1 503 Unavailable\r\n\r\n' if scheme == 'http' else b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
                         return
                     stream.settimeout(None)
                     stream.sendall(prefix)
+                    if ip in domain_services:
+                        relay_service(stream, domain_services[ip])
+                        return
+                    if ip == 'api64.ipify.org':
+                        # Deliberately not TLS: auto must fail closed rather than
+                        # accept an unauthenticated exit-family observation.
+                        stream.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n203.0.113.1')
+                        return
                     if port == 53:
                         data = frame(stream)
                         dns_queries.append(data)
@@ -241,7 +294,19 @@ with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
 
     run('profile', 'create', 'default', '--proxy-env', 'TEST_PROXY', '--dns', '[2001:db8::53]:53',
         '--timezone', 'Europe/Berlin', '--locale', 'C.UTF-8', '--direct', '192.168.65.1/32',
-        '--direct', 'fdc5:1234::1/128', '--internal-dns', f'internal.test=127.0.0.1:{internal_port}')
+        '--direct', 'fdc5:1234::1/128', '--internal-dns', f'internal.test=127.0.0.1:{internal_port}',
+        '--dns-preference', 'auto' if scheme == 'socks5h' else 'dual')
+    if scheme == 'socks5':
+        for preference in ('ipv4', 'ipv6', 'auto'):
+            run('profile', 'create', preference, '--proxy-env', 'TEST_PROXY', '--dns', '[2001:db8::53]:53',
+                '--timezone', 'Europe/Berlin', '--locale', 'C.UTF-8', '--dns-preference', preference)
+            if preference == 'auto':
+                marker = workspace / 'auto-must-not-launch'
+                result = run('--profile', preference, '/usr/bin/touch', str(marker), check=False)
+                assert result.returncode != 0 and not marker.exists()
+            else:
+                result = run('--profile', preference, '/usr/bin/python3', str(pathlib.Path(__file__).with_name('preference_client.py')), preference)
+                print(result.stdout.decode(), end='')
     import environment
     observation = environment.run(binary, env, workspace, reference[0] if reference else None)
     print('ENVWRAP_ENVIRONMENT_RESULT=' + json.dumps(observation), flush=True)
@@ -261,16 +326,20 @@ with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
     run(non_utf8, '-c', "from pathlib import Path; Path('non-utf8-command-marker').touch()")
     assert (workspace / 'non-utf8-command-marker').is_file()
     print('generic command: native option ownership, reserved-name escape and non-UTF8 executable PASS')
-    thread = spawn(host_callbacks)
-    result = run('/usr/bin/python3', str(pathlib.Path(__file__).with_name('network_client.py')))
+    thread = spawn(host_callbacks) if scheme != 'socks5h' else None
+    client = 'domain_client.py' if scheme == 'socks5h' else 'network_client.py'
+    result = run('/usr/bin/python3', str(pathlib.Path(__file__).with_name(client)))
     print(result.stdout.decode(), end='')
     assert (workspace / 'application-write').read_text() == 'original filesystem'
     assert (claude / 'settings.json').read_text() == '{"user-setting":true}'
-    thread.join(3)
-    assert not thread.is_alive()
+    if thread:
+        thread.join(3)
+        assert not thread.is_alive()
     assert not errors, errors
     assert all(b'\x08internal\x04test\x00' not in query.lower() for query in dns_queries)
-    assert all(not ipaddress.ip_address(ip).is_loopback for ip, _ in proxy_targets)
+    assert all(ip in domain_services or ip in ('missing.example', 'api64.ipify.org') or not ipaddress.ip_address(ip).is_loopback for ip, _ in proxy_targets)
+    if scheme == 'socks5h':
+        assert all(b'\x07example\x00' not in query.lower() for query in dns_queries)
     marker = workspace / 'should-not-run'
     result = run('/usr/bin/touch', str(marker), check=False)
     assert result.returncode != 0 and not marker.exists()

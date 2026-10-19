@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-当前开发版本 `0.3.0` 采用通用 `envwrap PROGRAM` 入口，最终门槛为[独立环境与网络验收](acceptance.md)。Claude 登录/模型对话不是环境保护的证明，也不再是发布前提。本地验收通过后提供操作者测试；按操作者要求，确认之前不发布新 GitHub Release 或 crates.io 包。历史 `v0.3.0-rc.1` 保持不变。
+正式版本 `0.3.0` 采用通用 `envwrap PROGRAM` 入口，发布门槛为[独立环境与网络验收](acceptance.md)，并已获操作者本机测试确认。Claude 登录/模型对话不是环境保护的证明。历史 `v0.3.0-rc.1` 保持不变；应用兼容性与隐私边界如下。
 
 目标：`envwrap PROGRAM` 使用原程序的 HOME、登录、配置、扩展、项目、PATH 和工具链，仅增加明确声明的网络路由和容器身份视图。`envwrap claude`、`envwrap codex`、`envwrap agy` 都遵循相同规则。
 
@@ -31,7 +31,7 @@ cargo build --release --locked
 
 ```sh
 # 私下设置 EGRESS_PROXY；不要把带密码的 URL 放在命令参数或共享日志里。
-# 支持 http://、socks5://、socks5h://；端点要求 IP 字面量，IPv6 用 [IP]:port。
+# 推荐 socks5h://127.0.0.1:10808；另支持 socks5://、http://，端点要求 IP 字面量。
 envwrap profile create default \
   --proxy-env EGRESS_PROXY \
   --dns 1.1.1.1:53 \
@@ -44,7 +44,7 @@ envwrap claude --resume
 envwrap git fetch
 ```
 
-以上时区、locale、DNS 只是示例，必须改成你明确选择的值。`locale -a` 查看已安装 locale；不存在的 locale 或 TZif 时区文件会拒绝启动。代理必须允许到所选 DNS 服务的 TCP 连接。每次启动先验证这条 CONNECT/SOCKS 路径，不进行 GeoIP 查询，不发送应用数据。`doctor` 另发一个根域 NS 查询，验证实际 DNS 策略的完整链路：默认走代理 TCP DNS，显式内部后缀 `.` 则走相应受信直连解析器。
+以上时区、locale、DNS 只是示例，必须改成你明确选择的值。`locale -a` 查看已安装 locale；不存在的 locale 或 TZif 时区文件会拒绝启动。SOCKS5h 启动验证代理认证，地址查询委托代理；SOCKS5/HTTP 启动验证到默认 DNS 的 TCP 路径，SOCKS5 `auto` 还经代理查询 `https://api64.ipify.org/` 的出口地址族。显式偏好跳过出口查询；任何必要预检失败都不启动应用。`doctor` 另发根域 NS 查询，验证默认代理 TCP DNS 或显式内部后缀 `.` 的直连策略；所以 SOCKS5h 下 doctor 也需要配置 DNS 服务可用。
 
 `--profile NAME` 必须在程序名或管理命令之前。例如：
 
@@ -72,6 +72,7 @@ Schema 2 的必需字段为 `version`、`name`、完整 `identity`、`network.pr
 
 可选网络字段：
 
+- `dns_preference = "auto"`：默认。SOCKS5 自动观察出口 IPv4/IPv6；HTTP 保留双栈；SOCKS5h 委托代理。显式 `ipv4` / `ipv6` / `dual` 适用于 SOCKS5/HTTP，不做出口探测。
 - `direct = ["192.168.65.0/24", "fd12:3456::/64"]`：显式受信直连范围；默认没有任何私网范围。禁止默认路由、保留虚拟网段重叠、组播及 IPv6 link-local 范围。
 - `internal_dns = [{ suffix = "corp.example", resolver = "127.0.0.53:53" }]`：该后缀及子域使用指定直连 DNS；最长后缀优先，大小写不敏感，按标签边界匹配。resolver 必须是宿主 loopback 或属于 `direct`。`.` 是显式全域规则，意味着所有 DNS 走这个受信本机解析器。
 - `search = ["corp.example"]`：明确的 resolver 搜索域，默认空。
@@ -87,7 +88,7 @@ Schema 2 的必需字段为 `version`、`name`、完整 `identity`、`network.pr
 | 流量 | 路径 |
 | --- | --- |
 | 外部 IPv4/IPv6 TCP | 私有网络 namespace 内核 REDIRECT → 宿主 broker → 指定 HTTP CONNECT/SOCKS5 代理 |
-| UDP/TCP 目标端口 53 | 先执行 DNS 策略；默认通过代理向配置 DNS 发 TCP 查询；不因 loopback/LAN 直连例外而绕过 |
+| UDP/TCP 目标端口 53 | 先匹配内部 DNS；外部 SOCKS5h A/AAAA 使用域名路由地址，其它记录经代理 DNS；SOCKS5/HTTP 使用代理 DNS 与地址族偏好 |
 | 显式内部 DNS 后缀 | 向指定受信解析器直连；UDP/TCP 客户端保持相应协议，无备用宿主解析 |
 | 子环境 localhost TCP/UDP | 优先子环境本机服务；不存在时访问宿主本机服务 |
 | 显式 LAN 范围 TCP/UDP | 宿主直连，不宣称经过代理 |
@@ -97,6 +98,8 @@ Schema 2 的必需字段为 `version`、`name`、完整 `identity`、`network.pr
 TLS 原样穿过代理；应用自行使用 DoH/DoT 时，其连接仍按 TCP 路由，但不改写加密的 DNS 内容。受信本机/LAN/Unix socket 服务可能再次转发请求，envwrap 不控制其后续流量。
 
 虚拟接口 `eth0`：`198.18.0.2/30`、`fd23:656e:7677::2/64`；同时保留真实工作的 `lo`。这些地址与网关只属于本次私有 namespace，不修改宿主路由。真实内核负责 TCP 状态、流控、分片；不模拟 TCP/IP 栈。
+
+SOCKS5h 另保留 `198.19.0.0/16`、`fd23:656e:7677:1::/64` 作为会话域名路由地址。它们不是公网服务器地址，不能跨会话保存或用来判断出口位置；不提供真实 DNSSEC 证明或提前 NXDOMAIN。IP 字面量及加密 DNS 结果仍按 IP 转发。详细语义、表容量与迁移见[配置参考](configuration.md)。
 
 辅助程序保留仅用于 namespace 内网络/挂载的能力；应用启动前清空 permitted/effective/inheritable/ambient capabilities 并启用 no-new-privileges。网络组件失败终止会话，无宿主外网直连回退。
 
@@ -143,10 +146,11 @@ cargo test --all-targets -- --nocapture
 cargo build --release --locked
 ```
 
-当前 **8 项测试通过**：6 项 CLI 配置/失败/脱敏回归，2 项最终入口的完整网络、身份与生命周期场景（HTTP CONNECT、SOCKS5 各一轮）。测试额外需要 Python 3.11+、util-linux 的 setpriv、Git、OpenSSH ssh-agent/ssh-add；不访问公网，所有服务位于测试新建的外层网络 namespace，不改宿主策略。
+当前 **13 项测试通过**：4 项域名表/出口响应边界测试、6 项 CLI 配置/失败/脱敏回归、3 项最终入口场景（HTTP CONNECT、SOCKS5、SOCKS5h）。测试额外需要 Python 3.11+、util-linux 的 setpriv、Git、OpenSSH ssh-agent/ssh-add；不访问公网，所有服务位于测试新建的外层网络 namespace，不改宿主策略。真实代理的自动出口观察另做部署 smoke，不冒充离线测试。
 
 - 透明 TCP v4/v6，预读、半关闭、连接建立后代理拒绝、增量流式传输，以及跨越 10 秒建连时限的空闲连接。
 - 受控 DNS、内部后缀大小写/标签边界、EDNS/TC/持久 TCP；最大 EDNS 响应不会破坏 IPv4 转发。
+- SOCKS5h 域名通过 IPv4/IPv6 路由标记到达不同真实测试服务；TCP/UDP DNS、libc 解析、大小写、内部 DNS 优先、未知地址拒绝；SOCKS5 的双栈偏好与单栈保留、出口探测失败不启动。
 - 显式本机/LAN v4/v6 例外，零长度与最大 UDP 数据报，对外 UDP 阻断，代理失败时对外 TCP 无直连回退、必要路径失败不启动应用。
 - hostname/machine-id/DMI 别名、时区内容/路径/libc、locale、netlink/ioctl/procfs/sysfs 一致；身份和派生 boot ID 跨启动稳定，宿主文件未修改。
 - 原 HOME、自定义配置、遥测设置、文件写入；真实 OpenSSH agent 协议与真实 Git clone/对象/工作树。
@@ -167,4 +171,4 @@ release 二进制另经实际运行验证非 UTF-8 argv/env、字面量 `${HOME}
 - 通用 `PROGRAM` 启动取代 RC 的 `run --` / Claude 专用分支；profile CRUD 与 doctor 保留。
 - rootless 内核 REDIRECT/TPROXY + 宿主 broker；没有 TUN、TLS 中间人或自制 TCP/IP 栈依赖。
 - 可识别的 Linux 容器身份与明确支持矩阵，不承诺“所有遥测由我们决定”。
-- 发布历史与当前未发布变更见 [CHANGELOG](../CHANGELOG.md)。
+- 发布历史与版本变更见 [CHANGELOG](../CHANGELOG.md)。

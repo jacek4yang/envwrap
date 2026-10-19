@@ -4,7 +4,6 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -41,6 +40,8 @@ pub struct Identity {
 pub struct Network {
     pub proxy: ProxySource,
     pub dns: std::net::SocketAddr,
+    #[serde(default)]
+    pub dns_preference: dns::Preference,
     #[serde(default)]
     pub direct: Vec<IpNet>,
     #[serde(default)]
@@ -215,6 +216,9 @@ impl Profile {
             if range.prefix_len() == 0 {
                 return Err("network.direct cannot contain a default route; declare trusted host/LAN prefixes".into());
             }
+            if crate::domain::overlaps(range) {
+                return Err("network.direct overlaps reserved domain routing ranges 198.19.0.0/16 or fd23:656e:7677:1::/64".into());
+            }
             if range.contains(&std::net::IpAddr::V4(kernel::GUEST_V4))
                 || range.contains(&std::net::IpAddr::V6(kernel::GUEST_V6))
             {
@@ -279,7 +283,7 @@ impl Profile {
         }
         Ok(())
     }
-    pub fn settings(&self) -> Result<Arc<broker::Settings>, String> {
+    pub fn settings(&self) -> Result<broker::Settings, String> {
         self.validate()?;
         let upstream = if let Some(name) = &self.network.proxy.env {
             let value = std::env::var(name)
@@ -307,6 +311,7 @@ impl Profile {
                     address: rule.resolver,
                 })
                 .collect(),
+            self.network.dns_preference,
         )?;
         let settings = broker::Settings {
             upstream,
@@ -314,7 +319,7 @@ impl Profile {
             direct: self.network.direct.clone(),
         };
         settings.validate()?;
-        Ok(Arc::new(settings))
+        Ok(settings)
     }
 }
 

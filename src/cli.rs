@@ -33,17 +33,21 @@ UDP is blocked. Host loopback and explicit trusted LAN ranges are direct.
 const CREATE_HELP: &str = "envwrap profile create NAME [OPTIONS]
 
 Required:
-  --proxy-env VAR       explicit environment variable holding an HTTP CONNECT or SOCKS5 URL
-  --dns IP:PORT         DNS server reached by TCP through that proxy
+  --proxy-env VAR       proxy URL variable; socks5h:// is recommended for proxy-side DNS
+  --dns IP:PORT         proxied resolver (socks5h uses it only for non-address records)
   --timezone ZONE       installed IANA zone, e.g. Europe/Berlin
   --locale LOCALE       installed locale; inspect locale -a
 Optional:
+  --dns-preference MODE auto (default), ipv4, ipv6 or dual; socks5h requires auto
   --hostname NAME       stable Linux hostname (otherwise generated at creation)
   --direct CIDR         trusted direct LAN range; repeatable, no implicit private ranges
   --internal-dns SUFFIX=IP:PORT   explicit direct resolver for a domain suffix; repeatable
   --search DOMAIN       DNS search domain; repeatable
 
 Proxy endpoints currently require a literal IP, including [IPv6]:port.
+socks5h delegates domain resolution and address selection to the proxy.
+socks5 auto observes the exit family via https://api64.ipify.org/ at startup;
+explicit ipv4/ipv6/dual skips that request. HTTP CONNECT auto means dual.
 Profiles are private TOML files. To store a URL instead, edit network.proxy to
 url = \"...\" and remove env. Never put a proxy password in command arguments.
 Creation never overwrites an existing profile. Runtime never generates identity.
@@ -190,6 +194,7 @@ fn profile(arguments: &[OsString]) -> Result<i32, String> {
             let mut locale = None;
             let mut proxy = None;
             let mut dns = None;
+            let mut dns_preference = None;
             let mut hostname = None;
             let mut direct = Vec::new();
             let mut internal_dns = Vec::new();
@@ -204,6 +209,7 @@ fn profile(arguments: &[OsString]) -> Result<i32, String> {
                     "--locale" => Some(&mut locale),
                     "--proxy-env" => Some(&mut proxy),
                     "--dns" => Some(&mut dns),
+                    "--dns-preference" => Some(&mut dns_preference),
                     "--hostname" => Some(&mut hostname),
                     "--direct" | "--search" | "--internal-dns" => None,
                     _ => return Err("unknown profile create option; use --help".into()),
@@ -247,6 +253,13 @@ fn profile(arguments: &[OsString]) -> Result<i32, String> {
                     .ok_or("missing --dns")?
                     .parse()
                     .map_err(|_| "--dns requires IP:PORT")?,
+                dns_preference: match dns_preference.as_deref().unwrap_or("auto") {
+                    "auto" => crate::dns::Preference::Auto,
+                    "ipv4" => crate::dns::Preference::Ipv4,
+                    "ipv6" => crate::dns::Preference::Ipv6,
+                    "dual" => crate::dns::Preference::Dual,
+                    _ => return Err("--dns-preference requires auto, ipv4, ipv6 or dual".into()),
+                },
                 direct,
                 internal_dns,
                 search,

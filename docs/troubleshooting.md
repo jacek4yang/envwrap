@@ -54,9 +54,9 @@ locale -a
 
 ## 代理和 DNS 错误
 
-### `configured proxy cannot establish the DNS TCP path; application was not started`
+### `configured proxy preflight failed`
 
-这表示启动预检没有成功通过代理连接到指定 DNS 的 TCP 端口。可能原因：
+SOCKS5h 表示代理协商/认证失败；SOCKS5/HTTP 表示无法通过代理建立默认 DNS 的 TCP 路径。应用没有启动。可能原因：
 
 - 代理客户端未运行，IP/端口错误或不可达；
 - 协议与服务不匹配，认证失败；
@@ -64,6 +64,11 @@ locale -a
 - 所选 DNS 仅支持 UDP，或服务没有监听对应 TCP 端口。
 
 此时应用没有被启动。不是“自动转为直连”或“用宿主 DNS 兜底”。选择真正能经该代理访问的 DNS 服务后再运行 doctor；不要因为一次失败就扩大 LAN 白名单。
+
+### `cannot observe SOCKS5 exit family`
+
+`socks5://` 默认 `dns_preference = "auto"`，需要通过代理完成 `https://api64.ipify.org/` 的证书验证和出口响应解析。服务不可达、TLS 错误、非 200 或非法 IP 响应均停止启动，不猜测 IPv4，不直连兜底。优先使用 `socks5h://` 让代理选择地址；需要真实 DNS 地址时，可显式设置 `network.dns_preference = "ipv4"`、`"ipv6"` 或 `"dual"`，跳过这个外部探测。这个设置不会改变时区或实际出口。
+
 
 ### doctor 能启动，但 DNS 查询失败
 
@@ -75,7 +80,9 @@ doctor 不是对所有目标地址、代理规则或 Claude 服务的可达性�
 
 如果强制 IPv4 的 HTTPS 请求成功，而默认地址族或 IPv6 请求出现 TLS EOF/reset，应对照检查代理的 IPv6 出站能力。原生 SOCKS5 对照必须使用同一个目标 IPv6 地址并保留原始 TLS SNI；只把域名交给 SOCKS5 解析，代理可能选择 IPv4，不能据此证明 IPv6 可用。
 
-透明 TCP 转发的本地握手可能早于上游连接完成。上游 IPv6 失败可能表现为连接后的 EOF/reset，应用的 Happy Eyeballs 不一定会再尝试 IPv4。envwrap 不会自动过滤 AAAA、关闭 IPv6 或绕过代理。`curl -4` 只能帮助定位问题，不是通用修复；应修复代理的 IPv6 路径，并重新验证实际应用。
+透明 TCP 转发的本地握手可能早于上游连接完成。上游 IPv6 失败可能表现为连接后的 EOF/reset，应用的 Happy Eyeballs 不一定会再尝试 IPv4。优先使用 `socks5h` 将域名交给代理选择地址；`socks5` 默认根据出口观察偏好一个地址族，双栈名字不提供另一族地址，单栈名字仍保留。IP 字面量、自带 DoH/DoT 或其它记录的 IP hints 不受此偏好影响。`curl -4` 仍可用于定位；不要把它当成 IPv6 路径已修复的证明，也不要关闭宿主 IPv6 或绕过代理。
+
+SOCKS5h 下 `getent`/DNS 检测器看见 `198.19.*` 或 `fd23:656e:7677:1::*` 是会话路由地址，不是 DNS 泄漏或真实出口。要求真实 IP、DNSSEC 验证或提前 NXDOMAIN 的工具使用 `socks5` + `dns_preference = "dual"`。不要跨运行保存这些合成 IP。
 
 ### QUIC、游戏或其它 UDP 应用不工作
 

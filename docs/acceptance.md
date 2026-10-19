@@ -2,7 +2,7 @@
 
 [返回 README](../README.md) · [运行边界](runtime.md)
 
-## 标准：envwrap-independent-v1
+## 标准：envwrap-independent-v2
 
 验收对象是 envwrap 对普通程序提供的**实际环境与网络行为**，不是 Claude 闭源实现。Claude 登录、真实模型对话、MCP/插件内部行为不再是发布的强制前提；它们可以作为可选的应用体验记录，未执行仍记为未执行。
 
@@ -21,6 +21,7 @@
 | 有意继承 | OS、内核、CPU 型号/flags/affinity、内存总量、磁盘设备/容量、用户、HOME/PATH/原配置与基线一致，不仅检查非空 |
 | 外部 TCP | 普通 socket 的 IPv4/IPv6 连接真实经 HTTP CONNECT/SOCKS5；流式传输、背压、半关闭、拒绝及建连时限后的空闲连接 |
 | DNS | UDP/TCP、libc getaddrinfo、内部后缀边界/大小写、EDNS/TC/持久 TCP、最大报文；默认不退回宿主 DNS |
+| SOCKS 解析语义 | SOCKS5h 的 A/AAAA 映射实际连接到不同域名服务，不误合并共享 IP 域名；未知地址/代理拒绝不改投目标；内部 DNS 优先；SOCKS5 双栈偏好、单栈保留、出口探测未验证时不启动 |
 | UDP 与例外 | 对外非 DNS UDP 阻断；本机/LAN IPv4/IPv6、零长/最大报文、子环境本机监听正常 |
 | 故障 | 代理不可用或必要链路失败不启动应用；运行中代理失败不建立公网直连；辅助进程丢失终止会话 |
 | 生命周期 | 真实 PTY、标准流、输入、窗口变化、Ctrl-C、自定义退出码、SIGTERM/SIGKILL、后代和描述符清理 |
@@ -62,7 +63,7 @@ python3 -B scripts/acceptance.py --binary target/release/envwrap \
 
 报告路径必须不存在，文件创建为 `0600`。stdout 为 JSON，stderr 为场景日志；退出 0 代表所有必需场景通过，1 表示场景失败/未完成，2 表示调用或报告生成错误。日志仅涉及测试生成的配置，独立原始观测先变成指纹再离开进程，发布报告只保留判定，不包含机器原始标识或 profile seed。
 
-报告记录实际二进制 SHA-256、版本、标准、两种代理场景、条件性接口、参考 checker 版本/哈希和应用会话未执行状态。不要拿其它二进制的报告代替当前包。发布包包含 `ACCEPTANCE.json`，并在 `BUILD-INFO.json` 关联同一验收。
+报告记录实际二进制 SHA-256、版本、标准、HTTP CONNECT/SOCKS5/SOCKS5h 三种场景、条件性接口、参考 checker 版本/哈希和应用会话未执行状态。离线测试明确设置 SOCKS5 的地址族模式，另验证自动探测错误时不执行程序；真实出口服务成功观察属于部署 smoke，不伪造为离线证明。不要拿其它二进制的报告代替当前包。发布包包含 `ACCEPTANCE.json`，并在 `BUILD-INFO.json` 关联同一验收。
 
 ## 本机正常使用前
 

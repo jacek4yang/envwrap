@@ -1,14 +1,16 @@
 # Changelog
 
-## 0.3.0 — 未发布，等待操作者本机测试确认
+## 0.3.0 — 2026-10-19
 
 - 通用 `envwrap PROGRAM [ARGS...]` 入口：Claude、Codex、agy 无专用分支；移除 `run --` 子命令，保留管理名可用 `-- PROGRAM` 转义。
+- 推荐真正的 `socks5h://` 域名代理解析：会话内 A/AAAA 路由映射、SOCKS5 域名目标、内部 DNS 优先；明确合成 IP、DNSSEC/NXDOMAIN、HTTPS/SVCB 和 DoH/字面量边界。
+- `socks5://` 默认经代理访问证书验证的 HTTPS 出口服务，按观察到的地址族选择 DNS 偏好；新增 `--dns-preference` / `network.dns_preference` 显式模式。保留单栈域名，探测失败不启动、不猜测、不直连。
 - 新增实际文件操作回归，覆盖程序参数归属、保留名和非 UTF-8 可执行路径。
-- 最终门槛改为 `envwrap-independent-v1`，不再以 Claude 登录/对话或风险评分为门槛。
+- 最终门槛改为 `envwrap-independent-v2`，覆盖 HTTP CONNECT、SOCKS5、SOCKS5h 和 DNS 偏好；不再以 Claude 登录/对话或风险评分为门槛。
 - 独立系统调用/procfs/sysfs/文件观测与 host-child 比较，验证别名一致、冬夏时区、namespace/capabilities、真实硬件/配置继承及宿主不变。
 - 可选只读 `claude-code-env-checker` 离线交叉验证；原始敏感 JSON 不落盘、不输出；必需字段不可用不算通过。
 - 发布脚本复用独立验收，二进制包附 `ACCEPTANCE.json`；报告关联实际二进制哈希。
-- 准备 GitHub 与 crates.io 最终发布，但在操作者测试确认前不上传新版本。
+- 操作者本机测试确认后的首个非预发布版本；发布到 crates.io 与 GitHub，仓库经当前文件、完整历史及历史资产敏感数据检查后公开。
 
 
 ## 0.3.0-rc.1 — 2026-10-19

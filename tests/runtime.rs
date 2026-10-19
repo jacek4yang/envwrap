@@ -47,5 +47,10 @@ fn http_transparent_network_and_original_environment() {
 }
 #[test]
 fn socks5_transparent_network_and_original_environment() {
+    network("socks5");
+}
+
+#[test]
+fn socks5h_domain_resolution_and_session_routing() {
     network("socks5h");
 }

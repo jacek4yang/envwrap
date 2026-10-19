@@ -199,7 +199,19 @@ fn serve(
     };
     match request {
         Request::Tcp(target) => {
-            let upstream = if settings.direct(target.ip()) {
+            let upstream = if crate::domain::reserved(target.ip()) {
+                if !settings.upstream.remote_dns() {
+                    return refused(client.get_mut());
+                }
+                match settings.dns.domains.lookup(target.ip()) {
+                    Ok(name) => {
+                        settings
+                            .upstream
+                            .connect_name(&name, target.port(), Arc::clone(&cancel))
+                    }
+                    Err(_) => return refused(client.get_mut()),
+                }
+            } else if settings.direct(target.ip()) {
                 transport::connect(target, Arc::clone(&cancel), wire::SETUP_TIMEOUT, None)
                     .map(BufReader::new)
             } else {

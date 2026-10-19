@@ -74,17 +74,12 @@ pub fn run(profile: &Profile, arguments: &[OsString]) -> Result<i32, String> {
     }
     identity::preflight(profile)?;
     let dependencies = Dependencies::find()?;
-    let settings = profile.settings()?;
-    // Check the declared proxy and DNS TCP destination, not an unrelated public
-    // IP/GeoIP service. No DNS query or application data is sent here.
+    let mut settings = profile.settings()?;
     let check = Cancel::new().map_err(display)?;
-    settings
-        .upstream
-        .connect(profile.network.dns, check)
-        .map_err(|_| {
-            "configured proxy cannot establish the DNS TCP path; application was not started"
-                .to_owned()
-        })?;
+    settings.upstream.check(profile.network.dns, Arc::clone(&check)).map_err(|_| {
+        "configured proxy preflight failed (SOCKS5h authentication or proxied DNS TCP path); application was not started".to_owned()
+    })?;
+    settings.dns.prepare(&settings.upstream, check)?;
     let temporary = tempfile::Builder::new()
         .prefix("envwrap-")
         .tempdir_in("/tmp")
@@ -93,7 +88,8 @@ pub fn run(profile: &Profile, arguments: &[OsString]) -> Result<i32, String> {
         .map_err(display)?;
     let files = identity::materialize(profile, temporary.path()).map_err(display)?;
     let signals = Signals::install().map_err(display)?;
-    let (broker, endpoint) = Broker::start(temporary.path(), settings).map_err(display)?;
+    let (broker, endpoint) =
+        Broker::start(temporary.path(), Arc::new(settings)).map_err(display)?;
     let control_path = temporary.path().join("control.sock");
     let listener = UnixListener::bind(&control_path).map_err(display)?;
     listener.set_nonblocking(true).map_err(display)?;

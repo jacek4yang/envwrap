@@ -27,9 +27,10 @@ envwrap 自身配置/启动错误返回状态 2；应用成功启动后保留其
 | 参数 | 必需 | 说明 |
 | --- | --- | --- |
 | `--proxy-env VAR` | 是 | 明确读取哪个环境变量中的代理 URL；存入配置的是变量名，不是当时的值 |
-| `--dns IP:PORT` | 是 | 默认 DNS 的 TCP 上游地址，通过代理访问；IPv6 为 `[IP]:PORT` |
+| `--dns IP:PORT` | 是 | 经代理访问的 DNS TCP 上游；SOCKS5h 的 A/AAAA 不用它，其它记录仍用它；IPv6 为 `[IP]:PORT` |
 | `--timezone ZONE` | 是 | `/usr/share/zoneinfo` 下已安装的 TZif 时区，例如 `Europe/Berlin` |
 | `--locale LOCALE` | 是 | 系统 libc 能创建的已安装 locale；用 `locale -a` 检查 |
+| `--dns-preference MODE` | 否 | `auto`（默认）、`ipv4`、`ipv6` 或 `dual`；SOCKS5h 必须保持 `auto` |
 | `--hostname NAME` | 否 | 小写 Linux hostname，1–63 字符，字母/数字/连字符，首尾为字母或数字 |
 | `--direct CIDR` | 否，可重复 | 显式受信直连范围，不自动放行所有私网 |
 | `--internal-dns SUFFIX=IP:PORT` | 否，可重复 | 为明确域名后缀指定受信直连解析器 |
@@ -64,6 +65,7 @@ profile 名称匹配 `[a-z0-9][a-z0-9_-]{0,63}`。不支持通过名称引用其
 | `identity.locale` | 字符串 | 已安装 locale |
 | `identity.seed` | 字符串 | 64 位小写十六进制，不能全部为零；用于 profile 级 boot ID 派生 |
 | `network.dns` | 字符串 | 默认 DNS `IP:PORT` |
+| `network.dns_preference` | 字符串 | 默认 `auto`：SOCKS5 探测出口地址族、HTTP 保留双栈、SOCKS5h 委托代理；可显式选择 `ipv4` / `ipv6` / `dual` |
 | `network.direct` | 字符串数组 | 可选，默认空；受信 CIDR |
 | `network.internal_dns` | 表数组 | 可选，默认空；每项有 `suffix` 和 `resolver` |
 | `network.search` | 字符串数组 | 可选，默认空；搜索域 |
@@ -85,18 +87,38 @@ env = "EGRESS_PROXY"
 
 ```toml
 [network.proxy]
-url = "socks5://127.0.0.1:1080"
+url = "socks5h://127.0.0.1:10808"
 ```
 
 这只是配置片段，不是完整 profile。不要同时保留 `env` 和 `url`。
 
 支持 HTTP CONNECT、SOCKS5 无认证或用户名/密码认证；HTTP 使用 Basic 代理认证。userinfo 支持百分号解码。SOCKS5 用户名和密码若启用认证，则各为 1–255 字节。代理地址目前要求 **IP 字面量**，避免为连接代理自身进行不受控的 bootstrap DNS；不接受代理域名、`https://` 代理、路径/查询/fragment（空路径或单个 `/` 除外）。建议始终显式给出端口。
 
-`socks5://` 与 `socks5h://` 在 envwrap 中使用同一受控 DNS 路径：普通 DNS 由你配置的 resolver 处理，然后以目标 IP 建立 SOCKS 连接。不要把其它工具里 `socks5h` 的远端域名解析语义直接套用到这里。
+**推荐 SOCKS5h，两个 scheme 不再互为别名：**
+
+- `socks5h://`：A/AAAA 映射到 `198.19.0.0/16` 与 `fd23:656e:7677:1::/64` 的会话内地址；TCP broker 还原原始域名，以 SOCKS5 ATYP=3 请求连接。代理决定实际解析与 IPv4/IPv6 路由；不调用出口查询服务。应用自己的 TLS/SNI 不变。
+- `socks5://`：普通 DNS 经 SOCKS5 TCP 发给配置的 resolver；连接目标为解析后的 IP。`auto` 每次启动经同一代理，以域名目标连接 `api64.ipify.org:443`，校验 HTTPS 证书，读取 `https://api64.ipify.org/` 返回的出口 IP，只保留本次会话的地址族偏好。探测失败、非 200、证书错误或非法响应都会阻止应用启动；不把“未知”当 IPv4。
+- `http://`：`auto` 等同 `dual`，不发出口探测；也可显式选择地址族偏好。
+
+`ipv4` / `ipv6` 是 DNS 偏好而非全局禁用：非首选族查询若有答案，会再查询首选族；两者都存在才对非首选族返回 NODATA，单栈域名仍返回它实际拥有的地址。`dual` 不改写地址记录。这只作用于外部 A/AAAA，不处理加密 DNS 的正文、其它记录中的地址提示或 IP 字面量，也不保证目标一定可达。自动观察仅反映该次探测的代理路由；按域名分流或运行中切换节点可能有其它出口。下一次启动重新观察。
+
+需要跳过出口探测时，在已有表中添加（不要创建重复 `[network]`）：
+
+```toml
+[network]
+dns = "1.1.1.1:53"
+dns_preference = "ipv4"
+```
+
+这是 SOCKS5/HTTP 的配置片段；其它已有字段保持不变。SOCKS5h 使用 `auto`，不由 envwrap 选择代理出站地址族。
+
+SOCKS5h 的合成地址 TTL 为 1 秒、仅在当前运行会话有效；每次运行最多映射 65,534 个域名，运行中不回收重用地址，避免缓存连接被误投到其它域名。未知/越界路由地址和表耗尽会拒绝请求，不发送合成 IP 给上游，不回退直连。不要跨会话缓存这些 IP，也不要把它们用于公网 IP/地理信息判断。`network.direct` 不允许与这些保留范围重叠。
+
+这不是完整远程 DNS 查询协议：SOCKS5 只能要求代理连接域名，不能取得其真实 A/AAAA 答案。不存在的域名在连接阶段由代理拒绝；要求提前 NXDOMAIN、真实 IP 或自行校验 DNSSEC 的程序应选择 SOCKS5/HTTP 的 `dual` 模式。合成/筛选响应不声称 DNSSEC 验证通过。SOCKS5h 对 HTTPS/SVCB 返回 NODATA 以避免 IP hints 绕过域名映射；其它类型仍走 `network.dns`。`/etc/hosts`、IP 字面量、自带 DoH/DoT 得到的地址没有域名映射，仍以 IP 经代理连接。
 
 ## DNS、LAN 与本机例外
 
-默认所有目标端口 53 的 UDP/TCP 先进入 DNS 策略，包括应用试图向 localhost 或某个其它 DNS IP 发包的情况。默认 resolver 通过代理 TCP 访问；并非把宿主 `/etc/resolv.conf` 原样传进去。
+默认所有目标端口 53 的 UDP/TCP 先进入 DNS 策略，包括应用试图向 localhost 或某个其它 DNS IP 发包的情况。显式内部 DNS 后缀最先匹配；外部查询再按上述 scheme 和地址族偏好处理。不是把宿主 `/etc/resolv.conf` 原样传进去，也不通过真实 IP 反猜域名。
 
 例子：为公司后缀使用本机受信解析器，同时允许明确的内网网段：
 
@@ -138,4 +160,4 @@ envwrap 覆盖 TZ/LANG/LC_ALL/HOSTNAME，并去除冲突的 TZDIR、LANGUAGE、L
 
 此过程不会替你迁移旧独立 HOME 中的 Claude 登录数据。是否需要恢复那部分应用配置，由操作者通过 Claude 官方方式处理，不复制未知凭据文件。
 
-从 `0.3.0-rc.1` 升级时，已有 schema 2 profile 可以保留；仅把旧 `envwrap run -- PROGRAM` 调用改为 `envwrap PROGRAM`。`claude` 现在与其它应用相同，不再是子命令。
+从 `0.3.0-rc.1` 升级时，已有 schema 2 profile 可以保留；把旧 `envwrap run -- PROGRAM` 调用改为 `envwrap PROGRAM`。`claude` 与其它应用相同，不再是子命令。注意新的网络语义：`socks5h` 改为域名目标；旧 `socks5` 配置未指定偏好时启用出口探测。需要保持旧的真实双栈 DNS 行为，可显式设置 `socks5` + `dns_preference = "dual"`。

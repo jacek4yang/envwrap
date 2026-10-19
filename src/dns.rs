@@ -1,4 +1,4 @@
-//! DNS policy: proxied TCP by default; explicit suffix-scoped local resolvers.
+//! Domain-proxy routing or proxied DNS with an explicit address-family policy.
 
 use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
@@ -6,6 +6,16 @@ use std::sync::Arc;
 
 use crate::transport::{Cancel, Channel};
 use crate::{upstream::Upstream, wire};
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Preference {
+    #[default]
+    Auto,
+    Ipv4,
+    Ipv6,
+    Dual,
+}
 
 pub struct LocalResolver {
     pub suffix: String,
@@ -18,9 +28,15 @@ struct Rule {
 pub struct Resolver {
     default: SocketAddr,
     local: Vec<Rule>,
+    preference: Preference,
+    pub domains: crate::domain::Domains,
 }
 impl Resolver {
-    pub fn new(default: SocketAddr, rules: Vec<LocalResolver>) -> Result<Self, String> {
+    pub fn new(
+        default: SocketAddr,
+        rules: Vec<LocalResolver>,
+        preference: Preference,
+    ) -> Result<Self, String> {
         validate_address(default)?;
         let mut local = Vec::with_capacity(rules.len());
         for rule in rules {
@@ -38,7 +54,59 @@ impl Resolver {
             });
         }
         local.sort_unstable_by_key(|rule| std::cmp::Reverse(rule.suffix.len()));
-        Ok(Self { default, local })
+        Ok(Self {
+            default,
+            local,
+            preference,
+            domains: crate::domain::Domains::default(),
+        })
+    }
+    pub fn prepare(&mut self, upstream: &Upstream, cancel: Arc<Cancel>) -> Result<(), String> {
+        if upstream.remote_dns() {
+            if self.preference != Preference::Auto {
+                return Err("socks5h delegates address selection to the proxy; use dns_preference = \"auto\"".into());
+            }
+        } else if self.preference == Preference::Auto {
+            self.preference = if upstream.socks5() {
+                let ip = crate::exit_ip::observe(upstream, cancel).map_err(|error| format!(
+                    "cannot observe SOCKS5 exit family via https://api64.ipify.org/ ({error}); application was not started; set network.dns_preference to ipv4, ipv6 or dual explicitly, or use socks5h"
+                ))?;
+                if ip.is_ipv4() {
+                    Preference::Ipv4
+                } else {
+                    Preference::Ipv6
+                }
+            } else {
+                Preference::Dual
+            };
+            if upstream.socks5() {
+                eprintln!(
+                    "envwrap: DNS preference {:?} (SOCKS5 exit observation; not an IPv6 capability test)",
+                    self.preference
+                );
+            }
+        }
+        Ok(())
+    }
+    fn domain_answer(&self, query: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let (name, kind, offset) = question(query)?;
+        if !matches!(kind, 1 | 28 | 64 | 65) || word(query, offset + 2) != 1 {
+            return Ok(None);
+        }
+        // SVCB/HTTPS IP hints would bypass the domain mapping. Returning
+        // NODATA makes clients use A/AAAA, without changing TLS or SNI.
+        let address = if matches!(kind, 1 | 28) {
+            let mut text = [0; 253];
+            let domain = name.domain(&mut text)?;
+            if domain.is_empty() {
+                None
+            } else {
+                Some(self.domains.address(domain, kind == 28)?)
+            }
+        } else {
+            None
+        };
+        Ok(Some(answer(query, offset + 4, address)))
     }
     pub fn local_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.local.iter().map(|r| r.address)
@@ -78,6 +146,45 @@ impl Resolver {
         cancel: Arc<Cancel>,
     ) -> io::Result<Vec<u8>> {
         let local = self.route(query)?;
+        if local.is_none()
+            && upstream.remote_dns()
+            && let Some(response) = self.domain_answer(query)?
+        {
+            return Ok(response);
+        }
+        let response = self.forward(query, local, upstream, Arc::clone(&cancel))?;
+        if local.is_none()
+            && !upstream.remote_dns()
+            && matches!(self.preference, Preference::Ipv4 | Preference::Ipv6)
+        {
+            let (_, kind, offset) = question(query)?;
+            let preferred = if self.preference == Preference::Ipv4 {
+                1
+            } else {
+                28
+            };
+            if word(query, offset + 2) == 1
+                && matches!(kind, 1 | 28)
+                && kind != preferred
+                && has_address(&response, kind)?
+            {
+                let mut alternate = query.to_vec();
+                alternate[offset..offset + 2].copy_from_slice(&preferred.to_be_bytes());
+                let other = self.forward(&alternate, None, upstream, cancel)?;
+                if has_address(&other, preferred)? {
+                    return Ok(answer(query, offset + 4, None));
+                }
+            }
+        }
+        Ok(response)
+    }
+    fn forward(
+        &self,
+        query: &[u8],
+        local: Option<SocketAddr>,
+        upstream: &Upstream,
+        cancel: Arc<Cancel>,
+    ) -> io::Result<Vec<u8>> {
         let target = local.unwrap_or(self.default);
         // TCP handles complete responses and DNS-over-TCP clients. This is a
         // fresh connection, so a failed setup is never retried through host DNS.
@@ -205,6 +312,28 @@ impl Name {
         }
         false
     }
+    fn domain<'a>(&self, text: &'a mut [u8; 253]) -> io::Result<&'a str> {
+        let mut offset = 0;
+        let mut used = 0;
+        while self.bytes[offset] != 0 {
+            let size = usize::from(self.bytes[offset]);
+            if used != 0 {
+                text[used] = b'.';
+                used += 1;
+            }
+            let label = &self.bytes[offset + 1..offset + 1 + size];
+            if !label
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            {
+                return Err(invalid("SOCKS5 domain requires ASCII labels; use punycode"));
+            }
+            text[used..used + size].copy_from_slice(label);
+            used += size;
+            offset += size + 1;
+        }
+        std::str::from_utf8(&text[..used]).map_err(|_| invalid("invalid domain"))
+    }
 }
 fn name(packet: &[u8], cursor: &mut usize) -> io::Result<Name> {
     let mut result = Name {
@@ -259,6 +388,69 @@ fn name(packet: &[u8], cursor: &mut usize) -> io::Result<Name> {
         }
     }
     Err(invalid("too many DNS compression pointers"))
+}
+fn question(query: &[u8]) -> io::Result<(Name, u16, usize)> {
+    let h = header(query)?;
+    if h.flags & 0xf800 != 0 || h.questions != 1 {
+        return Err(invalid("address policy requires one standard DNS question"));
+    }
+    let mut offset = 12;
+    let name = name(query, &mut offset)?;
+    if offset + 4 > query.len() {
+        return Err(invalid("short DNS question"));
+    }
+    Ok((name, word(query, offset), offset))
+}
+fn answer(query: &[u8], end: usize, address: Option<IpAddr>) -> Vec<u8> {
+    let mut reply = Vec::with_capacity(end + 28);
+    reply.extend_from_slice(&query[..end]);
+    reply[2..4].copy_from_slice(&(0x8080 | (word(query, 2) & 0x0110)).to_be_bytes());
+    reply[6..12].fill(0);
+    if let Some(ip) = address {
+        reply[6..8].copy_from_slice(&1u16.to_be_bytes());
+        reply.extend_from_slice(&[0xc0, 0x0c]);
+        let kind: u16 = if ip.is_ipv4() { 1 } else { 28 };
+        reply.extend_from_slice(&kind.to_be_bytes());
+        reply.extend_from_slice(&1u16.to_be_bytes());
+        reply.extend_from_slice(&1u32.to_be_bytes());
+        match ip {
+            IpAddr::V4(ip) => {
+                reply.extend_from_slice(&4u16.to_be_bytes());
+                reply.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                reply.extend_from_slice(&16u16.to_be_bytes());
+                reply.extend_from_slice(&ip.octets());
+            }
+        }
+    }
+    reply
+}
+fn has_address(packet: &[u8], kind: u16) -> io::Result<bool> {
+    let h = header(packet)?;
+    if h.flags & 0x020f != 0 {
+        return Ok(false);
+    }
+    let mut offset = questions_end(packet, h.questions)?;
+    for _ in 0..h.answers {
+        name(packet, &mut offset)?;
+        if offset + 10 > packet.len() {
+            return Err(invalid("short DNS answer"));
+        }
+        let size = usize::from(word(packet, offset + 8));
+        let end = offset
+            .checked_add(10 + size)
+            .filter(|&n| n <= packet.len())
+            .ok_or_else(|| invalid("short DNS address"))?;
+        if word(packet, offset) == kind
+            && word(packet, offset + 2) == 1
+            && size == if kind == 1 { 4 } else { 16 }
+        {
+            return Ok(true);
+        }
+        offset = end;
+    }
+    Ok(false)
 }
 fn questions_end(query: &[u8], count: u16) -> io::Result<usize> {
     let mut cursor = 12;

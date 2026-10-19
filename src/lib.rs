@@ -2,6 +2,8 @@ mod broker;
 mod callback;
 pub mod cli;
 mod dns;
+mod domain;
+mod exit_ip;
 mod identity;
 mod kernel;
 mod network;

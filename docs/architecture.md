@@ -29,7 +29,7 @@
                  |              -> 私有 Unix broker 通道 -> HTTP CONNECT / SOCKS5
                  |
                  +-- UDP/TCP DNS -> DNS 策略
-                 |                 -> 默认代理 TCP resolver / 明确内部直连 resolver
+                 |                 -> SOCKS5h 域名路由 / 代理 TCP resolver / 明确内部直连 resolver
                  |
                  +-- 明确 loopback / LAN -> 受信直连路径
                  +-- 其它对外 UDP -> 丢弃
@@ -41,7 +41,7 @@
 
 1. **参数解析。** 选择现有 profile；第一个程序名后的参数不再由 envwrap 解释。普通启动不需要分隔符；`-- PROGRAM` 用于转义保留管理名或以连字符开头的程序路径。
 2. **静态和基底验证。** 校验 schema/权限/字段，检查已安装 TZif 和 locale，定位 bwrap/ip/nft。任何失败都不启动应用。
-3. **代理路径预检。** 从明确来源取得代理配置，通过代理尝试连到默认 DNS TCP 地址。此步不查询 GeoIP，不发送应用请求；也不等于验证了 DNS 响应内容。
+3. **代理路径预检。** SOCKS5h 验证代理协商/认证，不要求先连默认 DNS；SOCKS5/HTTP 验证到默认 DNS 的 TCP 路径。SOCKS5 的 `auto` 再经代理访问固定 HTTPS 出口服务选择 DNS 偏好，失败则停止。不是 GeoIP 查询，也不证明所有目标可达。
 4. **建立宿主 broker。** 创建用户私有运行目录和鉴权 Unix 通道。凭据只用于宿主 broker，不进入辅助程序 argv/env。
 5. **构建 namespace 和声明视图。** 原根目录及 HOME 保留；对 `/etc` 作定向只读 overlay；提供 profile hostname/machine-id/TZ 等视图；挂载适合新网络 namespace 的 sysfs。
 6. **建立真实内核网络。** 创建 lo、dummy eth0、IPv4/IPv6 地址、路由及仅作用于该 namespace 的 nft REDIRECT/TPROXY 规则。
@@ -54,7 +54,11 @@
 
 TCP 的重传、拥塞控制、窗口和分片由 Linux 处理。转发层负责双向流、背压、半关闭、取消；建连/握手有时限，已建立的连接不因同一个建连时限被误判为空闲超时。
 
-DNS 不是让代理库按各自默认方式解析。应用看到受控 resolver 视图，常规 NSS 使用 `files dns`；专用 nscd 缓存路径被屏蔽，避免该 socket 绕过 DNS 路径。端口 53 查询进入统一规则：默认代理 TCP，显式内部后缀则直连对应受信 resolver。`/etc/hosts` 仍可参与本地名称解析。
+应用看到受控 resolver 视图，常规 NSS 使用 `files dns`；专用 nscd 缓存路径被屏蔽，避免该 socket 绕过 DNS 路径。端口 53 查询进入统一规则，显式内部后缀最先选择受信直连 resolver。`/etc/hosts` 仍可参与本地名称解析。
+
+SOCKS5h 对外部 A/AAAA 建立有界、会话内稳定的域名→路由地址映射，TCP broker 根据该地址发送 SOCKS5 域名请求。不会从共享 CDN IP、HTTP Host 或 TLS SNI 反猜域名；不解析应用 TLS。表不回收旧地址，未知地址拒绝，避免把已有缓存连接误投到另一域名。A/AAAA 之外的普通记录仍通过配置的 resolver；HTTPS/SVCB 返回无数据避免 IP hints 绕过映射。合成地址不是实际公网 DNS 答案。
+
+SOCKS5/HTTP 使用代理 TCP resolver。地址族偏好只在双栈名字上隐藏非首选族，保留单栈结果；内部 DNS 不改写。SOCKS5 的自动偏好来自一次经代理、证书验证的 HTTPS 出口观察，不持久化 IP，不代表全路径能力。详见[配置参考](configuration.md)。
 
 ## localhost 与回调
 
@@ -92,6 +96,8 @@ DMI 明示 `envwrap` / `Linux container`，不冒充某个厂商实体机。OS�
 | `src/broker.rs` | 宿主侧路由政策、上游代理与受信直连 |
 | `src/callback.rs` | 子环境 listener 发现、宿主 loopback 发布 |
 | `src/dns.rs` | DNS 协议处理、后缀路由、报文边界 |
+| `src/domain.rs` | 有界会话域名映射、保留地址识别、未知地址拒绝 |
+| `src/exit_ip.rs` | 经 SOCKS5 的固定 HTTPS 出口地址族观察；证书验证、报文/时限限制 |
 | `src/upstream.rs` / `src/proxy.rs` | HTTP CONNECT/SOCKS5 握手和地址解析 |
 | `src/wire.rs` | 私有通道协议、帧和共享边界 |
 | `src/transport.rs` / `src/relay.rs` | 可取消 I/O、时限、背压、双向流与半关闭 |

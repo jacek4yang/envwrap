@@ -101,7 +101,7 @@ def main():
         "build_glibc": output("getconf", "GNU_LIBC_VERSION"), "required_glibc_symbols_up_to": highest_glibc,
         "needed_libraries": re.findall(r"Shared library: \[([^\]]+)\]", output("readelf", "-d", str(binary))),
         "tested_kernel": os.uname().release, "tested_bubblewrap": output("bwrap", "--version"),
-        "checks": ["documentation", "fmt", "clippy", "all-targets tests", "release HTTP runtime", "release SOCKS5 runtime"],
+        "checks": ["documentation", "fmt", "clippy", "all-targets tests", "release HTTP runtime", "release SOCKS5 runtime", "release SOCKS5h runtime"],
         "acceptance_standard": acceptance["standard"],
         "acceptance_passed": acceptance["passed"],
         "reference_checker": acceptance["reference_checker"],

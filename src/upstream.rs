@@ -11,8 +11,13 @@ use crate::{
 };
 
 enum Protocol {
-    Http { authorization: String },
-    Socks5 { authentication: Vec<u8> },
+    Http {
+        authorization: String,
+    },
+    Socks5 {
+        authentication: Vec<u8>,
+        remote_dns: bool,
+    },
 }
 
 pub struct Upstream {
@@ -80,20 +85,102 @@ impl Upstream {
             } else {
                 Vec::new()
             };
-            Protocol::Socks5 { authentication }
+            Protocol::Socks5 {
+                authentication,
+                remote_dns: parts.scheme == "socks5h",
+            }
         };
         Ok(Self {
             address: SocketAddr::new(ip, port),
             protocol,
         })
     }
+    pub fn remote_dns(&self) -> bool {
+        matches!(
+            self.protocol,
+            Protocol::Socks5 {
+                remote_dns: true,
+                ..
+            }
+        )
+    }
+    pub fn socks5(&self) -> bool {
+        matches!(self.protocol, Protocol::Socks5 { .. })
+    }
+    fn start(&self, cancel: Arc<Cancel>) -> io::Result<BufReader<Channel<TcpStream>>> {
+        let mut reader = BufReader::new(transport::connect(
+            self.address,
+            cancel,
+            wire::SETUP_TIMEOUT,
+            None,
+        )?);
+        if let Protocol::Socks5 { authentication, .. } = &self.protocol {
+            let method = if authentication.is_empty() { 0 } else { 2 };
+            reader.get_mut().write_all(&[5, 1, method])?;
+            let mut reply = [0; 2];
+            reader.read_exact(&mut reply)?;
+            if reply != [5, method] {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "SOCKS5 authentication method refused",
+                ));
+            }
+            if method == 2 {
+                reader.get_mut().write_all(authentication)?;
+                reader.read_exact(&mut reply)?;
+                if reply != [1, 0] {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "SOCKS5 authentication rejected",
+                    ));
+                }
+            }
+        }
+        Ok(reader)
+    }
+    pub fn check(&self, dns: SocketAddr, cancel: Arc<Cancel>) -> io::Result<()> {
+        if self.remote_dns() {
+            self.start(cancel)?;
+        } else {
+            self.connect(dns, cancel)?;
+        }
+        Ok(())
+    }
+    pub fn connect_name(
+        &self,
+        name: &str,
+        port: u16,
+        cancel: Arc<Cancel>,
+    ) -> io::Result<BufReader<Channel<TcpStream>>> {
+        if !self.socks5()
+            || name.is_empty()
+            || name.len() > 253
+            || port == 0
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid SOCKS5 domain target",
+            ));
+        }
+        let mut reader = self.start(cancel)?;
+        let mut request = [0; 262];
+        request[..5].copy_from_slice(&[5, 1, 0, 3, name.len() as u8]);
+        request[5..5 + name.len()].copy_from_slice(name.as_bytes());
+        request[5 + name.len()..7 + name.len()].copy_from_slice(&port.to_be_bytes());
+        reader.get_mut().write_all(&request[..7 + name.len()])?;
+        socks_reply(&mut reader)?;
+        reader.get_mut().nonblocking();
+        Ok(reader)
+    }
     pub fn connect(
         &self,
         target: SocketAddr,
         cancel: Arc<Cancel>,
     ) -> io::Result<BufReader<Channel<TcpStream>>> {
-        let stream = transport::connect(self.address, cancel, wire::SETUP_TIMEOUT, None)?;
-        let mut reader = BufReader::new(stream);
+        let mut reader = self.start(cancel)?;
         match &self.protocol {
             Protocol::Http { authorization } => {
                 write!(
@@ -114,27 +201,7 @@ impl Upstream {
                 }
                 while !header_line(&mut reader, &mut budget)?.is_empty() {}
             }
-            Protocol::Socks5 { authentication } => {
-                let method = if authentication.is_empty() { 0 } else { 2 };
-                reader.get_mut().write_all(&[5, 1, method])?;
-                let mut reply = [0; 2];
-                reader.read_exact(&mut reply)?;
-                if reply != [5, method] {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "SOCKS5 authentication method refused",
-                    ));
-                }
-                if method == 2 {
-                    reader.get_mut().write_all(authentication)?;
-                    reader.read_exact(&mut reply)?;
-                    if reply != [1, 0] {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "SOCKS5 authentication rejected",
-                        ));
-                    }
-                }
+            Protocol::Socks5 { .. } => {
                 let mut request = [0; 22];
                 request[..3].copy_from_slice(&[5, 1, 0]);
                 let end = match target.ip() {
@@ -151,31 +218,35 @@ impl Upstream {
                 };
                 request[end..end + 2].copy_from_slice(&target.port().to_be_bytes());
                 reader.get_mut().write_all(&request[..end + 2])?;
-                let mut head = [0; 4];
-                reader.read_exact(&mut head)?;
-                if head[..3] != [5, 0, 0] {
-                    return Err(io::Error::new(
-                        io::ErrorKind::ConnectionRefused,
-                        "SOCKS5 CONNECT failed",
-                    ));
-                }
-                let length = match head[3] {
-                    1 => 4,
-                    4 => 16,
-                    3 => {
-                        let mut n = [0];
-                        reader.read_exact(&mut n)?;
-                        usize::from(n[0])
-                    }
-                    _ => return Err(io::Error::other("invalid SOCKS5 reply address")),
-                };
-                let mut address = [0; 257];
-                reader.read_exact(&mut address[..length + 2])?;
+                socks_reply(&mut reader)?;
             }
         }
         reader.get_mut().nonblocking();
         Ok(reader)
     }
+}
+
+fn socks_reply(reader: &mut impl Read) -> io::Result<()> {
+    let mut head = [0; 4];
+    reader.read_exact(&mut head)?;
+    if head[..3] != [5, 0, 0] {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "SOCKS5 CONNECT failed",
+        ));
+    }
+    let length = match head[3] {
+        1 => 4,
+        4 => 16,
+        3 => {
+            let mut n = [0];
+            reader.read_exact(&mut n)?;
+            usize::from(n[0])
+        }
+        _ => return Err(io::Error::other("invalid SOCKS5 reply address")),
+    };
+    let mut address = [0; 257];
+    reader.read_exact(&mut address[..length + 2])
 }
 
 fn header_line(reader: &mut impl std::io::BufRead, budget: &mut usize) -> io::Result<String> {

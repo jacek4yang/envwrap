@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-STANDARD = 'envwrap-independent-v1'
+STANDARD = 'envwrap-independent-v2'
 
 
 def digest(path):
@@ -37,7 +37,7 @@ def run_checks(binary, reference_checker=None):
             'status': 'NOT_EXECUTED', 'sha256': digest(checker),
             'version': subprocess.check_output([str(checker), '--version'], text=True, timeout=10).strip(),
         }
-    for scheme in ('http', 'socks5h'):
+    for scheme in ('http', 'socks5', 'socks5h'):
         command = [
             'bwrap', '--bind', '/', '/', '--dev-bind', '/dev', '/dev', '--proc', '/proc',
             '--unshare-user', '--unshare-net', '--cap-add', 'CAP_NET_ADMIN', '--cap-add', 'CAP_NET_RAW',
