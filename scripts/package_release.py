@@ -61,6 +61,8 @@ def main():
     check_docs()
     if args.check_docs:
         return
+    if Path(output("git", "rev-parse", "--show-toplevel")).resolve() != ROOT:
+        raise SystemExit("Packaging requires this project's own checkout, not an archive inside another repository.")
     if output("git", "status", "--porcelain", "--untracked-files=normal"):
         raise SystemExit("Commit all intended source changes first; release packaging requires a clean checkout.")
     rustc = output("rustc", "-vV")
@@ -106,6 +108,8 @@ def main():
     }
     if output("git", "status", "--porcelain", "--untracked-files=normal"):
         raise SystemExit("Verification changed the checkout; inspect before packaging.")
+    if output("git", "rev-parse", "HEAD") != commit:
+        raise SystemExit("HEAD changed during verification; rebuild from the intended commit.")
     dist = ROOT / "target/dist"
     dist.mkdir(parents=True, exist_ok=True)
     name = f"envwrap-v{version}-{TARGET}"
