@@ -1,469 +1,220 @@
-//! End-to-end CLI tests. Every child process runs with a cleared environment
-//! plus only what the test sets, so the host environment cannot leak in.
-
-use std::process::{Command, Output, Stdio};
-use std::time::Instant;
+//! CLI failures must not launch an unprotected program or expose profile secrets.
+use std::os::unix::fs::PermissionsExt;
+use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_envwrap");
-const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-
-fn bin() -> Command {
-    let mut c = Command::new(BIN);
-    c.env_clear().env("PATH", "/usr/bin:/bin");
-    c
-}
-
-fn run(mut cmd: Command, stdin: Option<&str>) -> Output {
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn envwrap");
-    if let Some(s) = stdin {
-        use std::io::Write;
-        child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(s.as_bytes())
-            .unwrap();
+struct Session(tempfile::TempDir);
+impl Session {
+    fn new() -> Self {
+        Self(tempfile::tempdir().unwrap())
     }
-    drop(child.stdin.take());
-    child.wait_with_output().expect("wait")
-}
-
-fn fixture(name: &str) -> String {
-    format!("{FIX}/{name}")
-}
-
-fn stdout(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stdout).into_owned()
-}
-
-fn stderr(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).into_owned()
-}
-
-#[test]
-fn export_plain_and_redacted() {
-    let mut c = bin();
-    c.args(["export", "--from-file", &fixture("secrets.env")]);
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "API_TOKEN=abc\nPLAIN='hello world'\n");
-    assert_eq!(o.status.code(), Some(0));
-
-    let mut c = bin();
-    c.args(["export", "--from-file", &fixture("secrets.env"), "--redact"]);
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "API_TOKEN='<redacted>'\nPLAIN='hello world'\n");
-    assert!(!stdout(&o).contains("abc"));
-    assert!(!stderr(&o).contains("abc"));
-}
-
-#[test]
-fn export_json_shape() {
-    let mut c = bin();
-    c.args([
-        "export",
-        "--format",
-        "json",
-        "--from-file",
-        &fixture("secrets.env"),
-    ]);
-    let o = run(c, None);
-    let s = stdout(&o);
-    assert_eq!(o.status.code(), Some(0));
-    // Minimal structural checks without a JSON dependency.
-    assert!(s.contains("\"variables\":{\"API_TOKEN\":\"abc\",\"PLAIN\":\"hello world\"}"));
-    assert!(s.contains("\"redacted\":false"));
-    assert!(s.contains("\"schema_version\":\"1.0\""));
-    let at = s
-        .split("\"generated_at\":\"")
-        .nth(1)
-        .and_then(|r| r.split('"').next())
-        .expect("generated_at present");
-    let bytes: Vec<char> = at.chars().collect();
-    assert_eq!(bytes.len(), 20, "{at}");
-    assert_eq!(bytes[4], '-');
-    assert_eq!(bytes[7], '-');
-    assert_eq!(bytes[10], 'T');
-    assert_eq!(bytes[13], ':');
-    assert_eq!(bytes[16], ':');
-    assert_eq!(bytes[19], 'Z');
-    assert!(s.ends_with("]}\n"));
-}
-
-#[test]
-fn export_diff_mode() {
-    let mut c = bin();
-    c.env("SAME", "1").args([
-        "export",
-        "--export-mode",
-        "diff",
-        "--from-file",
-        &fixture("layers.env"),
-    ]);
-    // layers.env sets FOO=bar and TZ=UTC; neither is in this env, so both emit.
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "FOO=bar\nTZ=UTC\n");
-
-    let mut c = bin();
-    c.env("FOO", "bar").args([
-        "export",
-        "--export-mode",
-        "diff",
-        "--from-file",
-        &fixture("layers.env"),
-    ]);
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "TZ=UTC\n");
-}
-
-#[test]
-fn check_mirror_conflict_and_ok() {
-    let mut c = bin();
-    c.args([
-        "check",
-        "--from-file",
-        &fixture("mirror-conflict.env"),
-        "--no-proxy-check",
-    ]);
-    let o = run(c, None);
-    // A mirror conflict is a Warning: reported, but exit stays 0.
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert!(stderr(&o).contains("mirror_conflict"));
-    assert!(stderr(&o).contains("differ"));
-
-    let mut c = bin();
-    c.args([
-        "check",
-        "--from-file",
-        &fixture("mirror-conflict.env"),
-        "--no-proxy-check",
-        "--strict",
-    ]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(3));
-
-    let mut c = bin();
-    c.args([
-        "check",
-        "--from-file",
-        &fixture("mirror-ok.env"),
-        "--no-proxy-check",
-    ]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert!(stdout(&o).starts_with("ok: "));
-}
-
-#[test]
-fn check_unreachable_proxy_is_fast() {
-    let start = Instant::now();
-    let mut c = bin();
-    c.args([
-        "check",
-        "--from-file",
-        &fixture("unreachable.env"),
-        "--proxy-timeout-ms",
-        "50",
-    ]);
-    let o = run(c, None);
-    let elapsed = start.elapsed();
-    assert_eq!(o.status.code(), Some(3));
-    assert!(stderr(&o).contains("unreachable_proxy"));
-    assert!(elapsed.as_secs() < 3, "took {elapsed:?}");
-}
-
-#[test]
-fn run_inherits_path() {
-    let mut c = bin();
-    c.args([
-        "run",
-        "--from-file",
-        &fixture("layers.env"),
-        "--inherit",
-        "PATH",
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf %s \"$FOO\"",
-    ]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(stdout(&o), "bar");
-}
-
-#[test]
-fn run_without_path_fails() {
-    let mut c = bin();
-    c.args([
-        "run",
-        "--from-file",
-        &fixture("layers.env"),
-        "--",
-        "/bin/sh",
-        "-c",
-        "true",
-    ]);
-    let o = run(c, None);
-    // /bin/sh is an absolute path, so it runs; the PATH guard applies to bare names.
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-
-    let mut c = bin();
-    c.args([
-        "run",
-        "--from-file",
-        &fixture("layers.env"),
-        "--",
-        "sh",
-        "-c",
-        "true",
-    ]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(2));
-    assert!(stderr(&o).contains("PATH is not set by the plan"));
-}
-
-#[test]
-fn wrap_unset_beats_ambient() {
-    let mut c = bin();
-    c.env("FOO", "ambient").args([
-        "wrap",
-        "--from-file",
-        &fixture("layers.env"),
-        "--allow-unknown",
-        "FOO",
-        "--unset",
-        "FOO",
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf %s \"${FOO-unset}\"",
-    ]);
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "unset", "{}", stderr(&o));
-    assert_eq!(o.status.code(), Some(0));
-}
-
-#[test]
-fn wrap_allow_unknown_and_strict() {
-    let mut c = bin();
-    c.args([
-        "wrap",
-        "--from-file",
-        &fixture("layers.env"),
-        "--allow-unknown",
-        "FOO",
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf %s \"$FOO\"",
-    ]);
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "bar");
-    assert_eq!(o.status.code(), Some(0));
-
-    let mut c = bin();
-    c.args([
-        "wrap",
-        "--from-file",
-        &fixture("layers.env"),
-        "--",
-        "/bin/sh",
-        "-c",
-        "true",
-    ]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(0));
-    assert!(
-        stderr(&o).contains("unknown_variable")
-            || stderr(&o).contains("not a known environment variable")
-    );
-
-    let mut c = bin();
-    c.args([
-        "wrap",
-        "--from-file",
-        &fixture("layers.env"),
-        "--strict",
-        "--",
-        "/bin/sh",
-        "-c",
-        "true",
-    ]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(4));
-}
-
-#[test]
-fn wrap_exit_codes() {
-    let mut c = bin();
-    c.args(["wrap", "--", "/bin/sh", "-c", "exit 7"]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(7));
-
-    let mut c = bin();
-    c.args(["wrap", "--", "/bin/sh", "-c", "kill -TERM $${$$}"]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(143), "{}", stderr(&o));
-}
-
-#[test]
-fn import_reports_count_and_already_set() {
-    let mut c = bin();
-    c.args(["import", "--from-file", &fixture("plain.env")]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert!(stderr(&o).contains("imported 1 variable"));
-
-    let mut c = bin();
-    c.env("IMPORTED_PROBE", "old")
-        .args(["import", "--from-file", &fixture("plain.env")]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(0));
-    assert!(stderr(&o).contains("already set"));
-}
-
-#[test]
-fn version_help_and_unknown_command() {
-    let mut c = bin();
-    c.arg("--version");
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "envwrap 0.1.0\n");
-    assert_eq!(o.status.code(), Some(0));
-
-    let mut c = bin();
-    c.arg("--help");
-    let o = run(c, None);
-    let s = stdout(&o);
-    for sub in ["export", "import", "check", "run", "wrap"] {
-        assert!(s.contains(sub), "help missing {sub}");
+    fn command(&self) -> Command {
+        let mut command = Command::new(BIN);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/usr/sbin:/bin")
+            .env("XDG_CONFIG_HOME", self.0.path());
+        command
     }
-
-    let mut c = bin();
-    c.arg("bogus");
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(2));
+    fn run(&self, args: &[&str]) -> Output {
+        self.command().args(args).output().unwrap()
+    }
+    fn create(&self, name: &str) -> Output {
+        self.run(&[
+            "profile",
+            "create",
+            name,
+            "--proxy-env",
+            "TEST_PROXY",
+            "--dns",
+            "192.0.2.53:53",
+            "--timezone",
+            "Etc/UTC",
+            "--locale",
+            "C.UTF-8",
+        ])
+    }
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        self.0
+            .path()
+            .join("envwrap/profiles")
+            .join(format!("{name}.toml"))
+    }
+    fn read(&self, name: &str) -> toml::Value {
+        toml::from_str(&std::fs::read_to_string(self.path(name)).unwrap()).unwrap()
+    }
+    fn set(&self, name: &str, value: &toml::Value) {
+        std::fs::write(self.path(name), toml::to_string(value).unwrap()).unwrap();
+    }
 }
-
-#[test]
-fn names_filter() {
-    let mut c = bin();
-    c.args([
-        "export",
-        "--names",
-        "API_TOKEN",
-        "--from-file",
-        &fixture("secrets.env"),
-    ]);
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "API_TOKEN=abc\n");
-
-    let mut c = bin();
-    c.args([
-        "export",
-        "--names",
-        "NOPE",
-        "--from-file",
-        &fixture("secrets.env"),
-    ]);
-    let o = run(c, None);
-    assert_eq!(o.status.code(), Some(0));
-    assert!(stderr(&o).contains("not defined"));
-}
-
-#[test]
-fn wrap_unset_beats_ambient_and_declared() {
-    let mut c = bin();
-    c.env("FOO", "ambient").args([
-        "wrap",
-        "--from-file",
-        &fixture("layers.env"),
-        "--allow-unknown",
-        "FOO",
-        "--unset",
-        "FOO",
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf %s \"${FOO-unset}\"",
-    ]);
-    let o = run(c, None);
-    assert_eq!(stdout(&o), "unset");
-}
-
-#[test]
-fn check_probes_only_the_effective_proxy() {
-    // http_proxy shadows HTTP_PROXY, so only 127.0.0.1:1 is probed.
-    let plan = "http_proxy=http://127.0.0.1:1\nHTTP_PROXY=https://proxy.example:3128\n";
-    let mut c = bin();
-    c.args(["check", "--proxy-timeout-ms", "50"]);
-    let o = run(c, Some(plan));
-    let err = stderr(&o);
-    assert!(err.contains("unreachable_proxy"));
-    assert!(err.contains("http_proxy:"), "{err}");
-    assert!(!err.contains("proxy.example"), "{err}");
-    assert!(err.contains("mirror_conflict"));
-}
-
-#[test]
-fn check_all_proxy_only_when_no_scheme_specific() {
-    let mut c = bin();
-    c.args(["check", "--proxy-timeout-ms", "50"]);
-    let o = run(c, Some("ALL_PROXY=http://127.0.0.1:1\n"));
-    assert_eq!(o.status.code(), Some(3));
-    assert!(stderr(&o).contains("ALL_PROXY"));
-
-    let mut c = bin();
-    c.args(["check", "--proxy-timeout-ms", "50"]);
-    let o = run(
-        c,
-        Some("ALL_PROXY=http://127.0.0.1:1\nHTTPS_PROXY=http://127.0.0.1:2\n"),
-    );
-    // Only the scheme-specific one is probed.
-    assert_eq!(o.status.code(), Some(3));
-    assert!(stderr(&o).contains("HTTPS_PROXY"));
-    assert!(!stderr(&o).contains("ALL_PROXY:"));
-}
-
-#[test]
-fn check_no_proxy_wildcard_warns() {
-    let mut c = bin();
-    c.args(["check", "--proxy-timeout-ms", "50"]);
-    let o = run(c, Some("HTTPS_PROXY=http://127.0.0.1:1\nNO_PROXY=*\n"));
+fn success(output: Output) {
     assert!(
-        stderr(&o).contains("no_proxy_bypasses_all"),
+        output.status.success(),
         "{}",
-        stderr(&o)
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[test]
-fn check_invalid_port_is_bad_proxy_url() {
-    let mut c = bin();
-    c.args(["check", "--proxy-timeout-ms", "50"]);
-    let o = run(c, Some("HTTPS_PROXY=http://h:\n"));
-    assert_eq!(o.status.code(), Some(3));
-    assert!(stderr(&o).contains("bad_proxy_url"));
+fn missing_profile_does_not_create_or_launch() {
+    let session = Session::new();
+    let marker = session.0.path().join("executed");
+    let output = session
+        .command()
+        .args(["run", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+    assert!(!session.0.path().join("envwrap").exists());
 }
 
 #[test]
-fn export_redacts_empty_userinfo() {
-    let mut c = bin();
-    c.args(["export", "--redact"]);
-    let o = run(c, Some("HTTPS_PROXY=https://@h:1\n"));
-    assert_eq!(stdout(&o), "HTTPS_PROXY='https://<redacted>@h:1'\n");
-}
-
-#[test]
-fn export_redacts_ipv6_proxy() {
-    let mut c = bin();
-    c.args(["export", "--redact"]);
-    let o = run(c, Some("https_proxy=http://u:p@[::1]:3128/x?a=1\n"));
+fn explicit_creation_is_private_stable_and_non_overwriting() {
+    let session = Session::new();
+    success(session.create("first"));
+    let before = std::fs::read(session.path("first")).unwrap();
     assert_eq!(
-        stdout(&o),
-        "https_proxy='http://<redacted>@[::1]:3128'\n",
-        "{}",
-        stderr(&o)
+        std::fs::metadata(session.path("first"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o077,
+        0
     );
+    assert!(!session.create("first").status.success());
+    assert_eq!(std::fs::read(session.path("first")).unwrap(), before);
+    success(session.create("second"));
+    let first = session.read("first");
+    let second = session.read("second");
+    for field in ["hostname", "machine_id", "product_uuid", "mac", "seed"] {
+        assert_ne!(
+            first["identity"][field], second["identity"][field],
+            "cross-profile identity: {field}"
+        );
+    }
+    success(session.run(&["profile", "delete", "first"]));
+    assert!(!session.path("first").exists());
+    assert!(session.path("second").exists());
+}
+
+#[test]
+fn invalid_required_configuration_never_executes() {
+    let session = Session::new();
+    success(session.create("default"));
+    let original = session.read("default");
+    let marker = session.0.path().join("executed");
+    let mut cases = Vec::new();
+    for (field, value) in [
+        ("timezone", "NoSuchZone/Unavailable"),
+        ("locale", "not_installed.UTF-8"),
+        ("hostname", "bad\nhost"),
+        ("machine_id", "00000000000000000000000000000000"),
+    ] {
+        let mut config = original.clone();
+        config["identity"][field] = value.into();
+        cases.push(config);
+    }
+    let mut old = original.clone();
+    old["version"] = 1.into();
+    cases.push(old);
+    let mut missing = original.clone();
+    missing["network"].as_table_mut().unwrap().remove("dns");
+    cases.push(missing);
+    let mut default_route = original.clone();
+    default_route["network"]["direct"] = toml::Value::Array(vec!["0.0.0.0/0".into()]);
+    cases.push(default_route);
+    for config in cases {
+        session.set("default", &config);
+        let output = session
+            .command()
+            .args(["run", "--", "/usr/bin/touch"])
+            .arg(&marker)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!marker.exists());
+    }
+}
+
+#[test]
+fn show_and_parse_errors_do_not_expose_proxy_credentials_or_seed() {
+    let session = Session::new();
+    success(session.create("default"));
+    let mut config = session.read("default");
+    let seed = config["identity"]["seed"].as_str().unwrap().to_owned();
+    let proxy = config["network"]["proxy"].as_table_mut().unwrap();
+    proxy.remove("env");
+    proxy.insert(
+        "url".into(),
+        "http://private-user:private-password@127.0.0.1:8123".into(),
+    );
+    session.set("default", &config);
+    let output = session.run(&["profile", "show", "default"]);
+    assert!(output.status.success());
+    for bytes in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(
+            !text.contains("private-user")
+                && !text.contains("private-password")
+                && !text.contains(&seed)
+        );
+    }
+    std::fs::write(
+        session.path("default"),
+        "version = 2\nname = \"private-password\n",
+    )
+    .unwrap();
+    let output = session.run(&["doctor"]);
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("private-password"));
+}
+
+#[test]
+fn insecure_profile_and_missing_explicit_proxy_do_not_launch() {
+    let session = Session::new();
+    success(session.create("default"));
+    let marker = session.0.path().join("executed");
+    let output = session
+        .command()
+        .env("HTTP_PROXY", "http://private-password@127.0.0.1:9")
+        .args(["run", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("private-password"));
+    std::fs::set_permissions(
+        session.path("default"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let output = session
+        .command()
+        .env("TEST_PROXY", "http://127.0.0.1:9")
+        .args(["run", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+}
+
+#[test]
+fn misplaced_credential_url_is_not_repeated_in_usage_errors() {
+    let session = Session::new();
+    let output = session.run(&[
+        "profile",
+        "create",
+        "default",
+        "http://sample-user:sample-password@127.0.0.1:9",
+    ]);
+    assert!(!output.status.success());
+    assert!(!session.path("default").exists());
+    for bytes in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("sample-user") && !text.contains("sample-password"));
+    }
 }
