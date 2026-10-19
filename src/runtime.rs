@@ -70,7 +70,7 @@ fn locate(name: &str) -> Result<PathBuf, String> {
 
 pub fn run(profile: &Profile, arguments: &[OsString]) -> Result<i32, String> {
     if arguments.is_empty() || arguments[0].is_empty() {
-        return Err("a program is required after run --".into());
+        return Err("a program is required".into());
     }
     identity::preflight(profile)?;
     let dependencies = Dependencies::find()?;

@@ -61,7 +61,7 @@ fn missing_profile_does_not_create_or_launch() {
     let marker = session.0.path().join("executed");
     let output = session
         .command()
-        .args(["run", "--", "/usr/bin/touch"])
+        .args(["/usr/bin/touch"])
         .arg(&marker)
         .output()
         .unwrap();
@@ -129,7 +129,7 @@ fn invalid_required_configuration_never_executes() {
         session.set("default", &config);
         let output = session
             .command()
-            .args(["run", "--", "/usr/bin/touch"])
+            .args(["/usr/bin/touch"])
             .arg(&marker)
             .output()
             .unwrap();
@@ -179,7 +179,7 @@ fn insecure_profile_and_missing_explicit_proxy_do_not_launch() {
     let output = session
         .command()
         .env("HTTP_PROXY", "http://private-password@127.0.0.1:9")
-        .args(["run", "--", "/usr/bin/touch"])
+        .args(["/usr/bin/touch"])
         .arg(&marker)
         .output()
         .unwrap();
@@ -194,7 +194,7 @@ fn insecure_profile_and_missing_explicit_proxy_do_not_launch() {
     let output = session
         .command()
         .env("TEST_PROXY", "http://127.0.0.1:9")
-        .args(["run", "--", "/usr/bin/touch"])
+        .args(["/usr/bin/touch"])
         .arg(&marker)
         .output()
         .unwrap();

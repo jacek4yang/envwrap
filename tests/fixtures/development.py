@@ -17,7 +17,7 @@ def run(binary, env, workspace):
             assert time.monotonic() < deadline
             time.sleep(.02)
         native = subprocess.run(['ssh-add', '-l'], env=environment, capture_output=True, timeout=5)
-        wrapped = subprocess.run([binary, 'run', '--', 'ssh-add', '-l'], env=environment,
+        wrapped = subprocess.run([binary, 'ssh-add', '-l'], env=environment,
                                  capture_output=True, timeout=10)
         # OpenSSH exit 1 = a reachable agent with no identities; 2 = no agent.
         assert native.returncode == wrapped.returncode == 1, (wrapped.returncode, wrapped.stderr)
@@ -57,7 +57,7 @@ def run(binary, env, workspace):
             except ConnectionRefusedError:
                 assert time.monotonic() < deadline
                 time.sleep(.02)
-        result = subprocess.run([binary, 'run', '--', 'git', 'clone', '-q',
+        result = subprocess.run([binary, 'git', 'clone', '-q',
                                  f'git://127.0.0.1:{port}/origin.git', 'checkout'],
                                 env=git_environment, cwd=workspace, capture_output=True, timeout=15)
         assert result.returncode == 0, result.stderr

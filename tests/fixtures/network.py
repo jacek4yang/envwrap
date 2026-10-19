@@ -12,7 +12,8 @@ import tempfile
 import threading
 import time
 
-binary, scheme = sys.argv[1:]
+binary, scheme, *reference = sys.argv[1:]
+assert len(reference) <= 1, 'at most one reference checker'
 errors = []
 proxy_targets = []
 dns_queries = []
@@ -231,7 +232,6 @@ with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
                 stream.sendall(b'host-callback')
                 assert exact(stream, 13) == b'host-callback'
 
-    thread = spawn(host_callbacks)
 
     def run(*arguments, check=True):
         result = subprocess.run([binary, *arguments], env=env, cwd=workspace, capture_output=True, timeout=45)
@@ -242,7 +242,27 @@ with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
     run('profile', 'create', 'default', '--proxy-env', 'TEST_PROXY', '--dns', '[2001:db8::53]:53',
         '--timezone', 'Europe/Berlin', '--locale', 'C.UTF-8', '--direct', '192.168.65.1/32',
         '--direct', 'fdc5:1234::1/128', '--internal-dns', f'internal.test=127.0.0.1:{internal_port}')
-    result = run('run', '--', '/usr/bin/python3', str(pathlib.Path(__file__).with_name('network_client.py')))
+    import environment
+    observation = environment.run(binary, env, workspace, reference[0] if reference else None)
+    print('ENVWRAP_ENVIRONMENT_RESULT=' + json.dumps(observation), flush=True)
+    # Real filesystem effects cover option ownership, reserved names and non-UTF8 executable paths.
+    run('/usr/bin/touch', '--', '--profile')
+    assert (workspace / '--profile').is_file()
+    (workspace / 'doctor').symlink_to('/usr/bin/python3')
+    old_path = env['PATH']
+    env['PATH'] = str(workspace) + ':' + old_path
+    try:
+        run('--', 'doctor', '-c', "from pathlib import Path; Path('reserved-command-marker').touch()")
+    finally:
+        env['PATH'] = old_path
+    assert (workspace / 'reserved-command-marker').is_file()
+    non_utf8 = os.fsencode(workspace) + b'/tool-\xff'
+    os.symlink('/usr/bin/python3', non_utf8)
+    run(non_utf8, '-c', "from pathlib import Path; Path('non-utf8-command-marker').touch()")
+    assert (workspace / 'non-utf8-command-marker').is_file()
+    print('generic command: native option ownership, reserved-name escape and non-UTF8 executable PASS')
+    thread = spawn(host_callbacks)
+    result = run('/usr/bin/python3', str(pathlib.Path(__file__).with_name('network_client.py')))
     print(result.stdout.decode(), end='')
     assert (workspace / 'application-write').read_text() == 'original filesystem'
     assert (claude / 'settings.json').read_text() == '{"user-setting":true}'
@@ -252,18 +272,18 @@ with tempfile.TemporaryDirectory(prefix='envwrap-network-test-') as root:
     assert all(b'\x08internal\x04test\x00' not in query.lower() for query in dns_queries)
     assert all(not ipaddress.ip_address(ip).is_loopback for ip, _ in proxy_targets)
     marker = workspace / 'should-not-run'
-    result = run('run', '--', '/usr/bin/touch', str(marker), check=False)
+    result = run('/usr/bin/touch', str(marker), check=False)
     assert result.returncode != 0 and not marker.exists()
     failed.clear()
     result = run('doctor')
     print(result.stdout.decode(), end='')
-    result = run('run', '--', '/bin/sh', '-c', 'exit 37', check=False)
+    result = run('/bin/sh', '-c', 'exit 37', check=False)
     assert result.returncode == 37
     print(f'{scheme}: actual final CLI, authenticated proxy, identity/config preservation and fail-closed startup PASS')
     snapshot = "import json,pathlib,socket; print(json.dumps([socket.gethostname()]+[pathlib.Path(p).read_text() for p in ['/etc/machine-id','/proc/sys/kernel/random/boot_id','/sys/class/net/eth0/address']]))"
     before = pathlib.Path(env['TEST_PROFILE']).read_bytes()
-    first = run('run', '--', '/usr/bin/python3', '-c', snapshot).stdout
-    second = run('run', '--', '/usr/bin/python3', '-c', snapshot).stdout
+    first = run('/usr/bin/python3', '-c', snapshot).stdout
+    second = run('/usr/bin/python3', '-c', snapshot).stdout
     assert json.loads(first) == json.loads(second)
     assert pathlib.Path(env['TEST_PROFILE']).read_bytes() == before
     assert all(pathlib.Path(path).read_bytes() == contents for path, contents in host_identity.items())

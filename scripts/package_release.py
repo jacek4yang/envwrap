@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -57,6 +58,7 @@ def check_docs():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-docs", action="store_true", help="only check local documentation links and fences")
+    parser.add_argument("--reference-checker", type=Path, help="optional offline checker cross-check in the independent acceptance gate")
     args = parser.parse_args()
     check_docs()
     if args.check_docs:
@@ -82,16 +84,12 @@ def main():
     binary = ROOT / "target" / TARGET / "release" / "envwrap"
     if output(str(binary), "--version") != f"envwrap {version}":
         raise SystemExit("Built version does not match Cargo.toml.")
-    # Exercise the actual optimized artifact, not just Cargo's test executable.
-    for scheme in ("http", "socks5h"):
-        run(
-            "bwrap", "--bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc",
-            "--unshare-user", "--unshare-net", "--cap-add", "CAP_NET_ADMIN", "--cap-add", "CAP_NET_RAW",
-            "--die-with-parent", "--", "/bin/sh",
-            str(ROOT / "tests/fixtures/network_namespace.sh"),
-            str(ROOT / "tests/fixtures/network.py"), str(binary), scheme,
-            env={"PATH": "/usr/bin:/usr/sbin:/bin"},
-        )
+    # The same independent acceptance is used by developers and release builds.
+    sys.dont_write_bytecode = True
+    from acceptance import run_checks
+    acceptance = run_checks(binary, args.reference_checker)
+    if not acceptance["passed"]:
+        raise SystemExit("Independent environment/network acceptance failed; no release assets generated.")
     requirements = output("readelf", "--version-info", str(binary))
     glibc_versions = re.findall(r"Name: GLIBC_([0-9.]+)", requirements)
     if not glibc_versions:
@@ -104,7 +102,10 @@ def main():
         "needed_libraries": re.findall(r"Shared library: \[([^\]]+)\]", output("readelf", "-d", str(binary))),
         "tested_kernel": os.uname().release, "tested_bubblewrap": output("bwrap", "--version"),
         "checks": ["documentation", "fmt", "clippy", "all-targets tests", "release HTTP runtime", "release SOCKS5 runtime"],
-        "claude_authenticated_acceptance": "not completed; release remains a candidate",
+        "acceptance_standard": acceptance["standard"],
+        "acceptance_passed": acceptance["passed"],
+        "reference_checker": acceptance["reference_checker"],
+        "claude_authenticated_acceptance": "not executed; optional application compatibility evidence, not a release gate",
     }
     if output("git", "status", "--porcelain", "--untracked-files=normal"):
         raise SystemExit("Verification changed the checkout; inspect before packaging.")
@@ -118,6 +119,7 @@ def main():
         stage = Path(temporary) / name
         stage.mkdir()
         shutil.copy2(binary, stage / "envwrap")
+        (stage / "ACCEPTANCE.json").write_text(json.dumps(acceptance, indent=2) + "\n")
         for filename in ("README.md", "LICENSE", "CHANGELOG.md"):
             shutil.copy2(ROOT / filename, stage / filename)
         shutil.copytree(ROOT / "docs", stage / "docs")

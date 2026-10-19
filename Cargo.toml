@@ -1,11 +1,24 @@
 [package]
 name = "envwrap"
-version = "0.3.0-rc.1"
+version = "0.3.0"
 edition = "2024"
 description = "Linux transparent proxy and declared container identity with native application configuration"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/jacek4yang/envwrap"
+keywords = ["proxy", "socks5", "linux", "cli", "privacy"]
+categories = ["command-line-utilities", "network-programming"]
+include = [
+    "src/**",
+    "tests/**",
+    "scripts/**",
+    "docs/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "Cargo.toml",
+    "Cargo.lock",
+]
 
 [lib]
 name = "envwrap"

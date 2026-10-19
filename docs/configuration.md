@@ -7,9 +7,9 @@
 | 命令 | 作用 |
 | --- | --- |
 | `envwrap --help` / `--version` | envwrap 自身帮助与版本；不需要 profile |
-| `envwrap [--profile NAME] claude [ARGS...]` | 在受控运行环境启动 PATH 中的 Claude；后续参数全部属于 Claude |
-| `envwrap [--profile NAME] run -- PROGRAM [ARGS...]` | 运行任意程序；不隐式执行 shell |
-| `envwrap [--profile NAME] doctor` | 运行真实 namespace/身份/DNS 诊断，不启动 Claude 对话 |
+| `envwrap [--profile NAME] PROGRAM [ARGS...]` | 通用启动；程序名后的参数全部属于该程序，Claude/Codex/agy 无专用分支 |
+| `envwrap [--profile NAME] -- PROGRAM [ARGS...]` | 显式转义保留管理名或以 `-` 开头的可执行路径 |
+| `envwrap [--profile NAME] doctor` | 运行真实 namespace/身份/DNS 诊断，不调用模型服务 |
 | `envwrap profile create NAME [OPTIONS]` | 显式创建完整配置；不覆盖同名文件 |
 | `envwrap profile create NAME --help` | 查看创建参数，不创建配置 |
 | `envwrap profile list` | 列出配置名 |
@@ -17,6 +17,8 @@
 | `envwrap profile delete NAME` | 删除指定 profile；不删除 Claude 账号、配置、会话或项目 |
 
 默认选择 `default`。`--profile` 放在命令前：`envwrap --profile work claude --resume`。缺少 profile 时失败，不自动创建；没有“找不到就不带保护运行”的行为。
+
+保留管理名为 `profile`、`doctor`。普通程序不需要 `run --`；程序恰好叫 `doctor` 时使用 `envwrap -- doctor`。程序名之后的 `--profile`、`--help`、`--version` 原样交给程序；可执行路径本身也支持非 UTF-8。
 
 envwrap 自身配置/启动错误返回状态 2；应用成功启动后保留其退出码，应用被信号终止时按 `128 + signal` 表达。错误处理者应区分“程序没有启动”和应用自身返回 2，不能仅凭数值推断来源。
 
@@ -130,8 +132,10 @@ envwrap 覆盖 TZ/LANG/LC_ALL/HOSTNAME，并去除冲突的 TZDIR、LANGUAGE、L
 
 1. 保留旧二进制与私有配置备份。
 2. 用不同名称创建 schema 2 profile，例如 `work-v2`。
-3. 用新二进制显式选择该 profile，先 doctor，再真实 Claude 验收。
+3. 用新二进制显式选择该 profile，运行 doctor；发布验收使用[独立检测](acceptance.md)，应用登录/对话不作为环境验收门槛。
 4. 如需直接 `envwrap claude`，完成验证后自行备份旧 `default`，再显式删除并重新创建新的 `default`。
 5. 最后更新日常 PATH 入口。
 
 此过程不会替你迁移旧独立 HOME 中的 Claude 登录数据。是否需要恢复那部分应用配置，由操作者通过 Claude 官方方式处理，不复制未知凭据文件。
+
+从 `0.3.0-rc.1` 升级时，已有 schema 2 profile 可以保留；仅把旧 `envwrap run -- PROGRAM` 调用改为 `envwrap PROGRAM`。`claude` 现在与其它应用相同，不再是子命令。

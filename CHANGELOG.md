@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 — 未发布，等待操作者本机测试确认
+
+- 通用 `envwrap PROGRAM [ARGS...]` 入口：Claude、Codex、agy 无专用分支；移除 `run --` 子命令，保留管理名可用 `-- PROGRAM` 转义。
+- 新增实际文件操作回归，覆盖程序参数归属、保留名和非 UTF-8 可执行路径。
+- 最终门槛改为 `envwrap-independent-v1`，不再以 Claude 登录/对话或风险评分为门槛。
+- 独立系统调用/procfs/sysfs/文件观测与 host-child 比较，验证别名一致、冬夏时区、namespace/capabilities、真实硬件/配置继承及宿主不变。
+- 可选只读 `claude-code-env-checker` 离线交叉验证；原始敏感 JSON 不落盘、不输出；必需字段不可用不算通过。
+- 发布脚本复用独立验收，二进制包附 `ACCEPTANCE.json`；报告关联实际二进制哈希。
+- 准备 GitHub 与 crates.io 最终发布，但在操作者测试确认前不上传新版本。
+
+
 ## 0.3.0-rc.1 — 2026-10-19
 
 首个 GitHub Release；标记为预发布候选版，不是已完成 Claude 生产专项验收的稳定版。

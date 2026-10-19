@@ -12,8 +12,8 @@ use crate::{
 const HELP: &str = "envwrap — Linux transparent proxy and declared container identity
 
 USAGE:
-  envwrap [--profile NAME] claude [CLAUDE_ARGS...]
-  envwrap [--profile NAME] run -- PROGRAM [ARGS...]
+  envwrap [--profile NAME] PROGRAM [ARGS...]
+  envwrap [--profile NAME] -- PROGRAM [ARGS...]
   envwrap [--profile NAME] doctor
   envwrap profile create NAME --proxy-env VAR --dns IP:PORT --timezone ZONE --locale LOCALE
   envwrap profile show NAME
@@ -21,9 +21,10 @@ USAGE:
   envwrap profile delete NAME
 
 Default profile selection: default. Missing profiles are never created on launch.
-Put --profile before the command. All arguments after claude belong to Claude,
-including --help, --version and --resume. HOME, login and application settings
-remain your own. No TLS interception or control of arbitrary telemetry payloads.
+Put --profile before PROGRAM. All arguments after PROGRAM belong to that program.
+Use -- before PROGRAM to escape reserved names (profile, doctor) or leading dashes.
+HOME, login and application settings remain your own. No TLS interception or
+control of arbitrary telemetry payloads. Examples: envwrap claude, envwrap codex.
 
 Requirements: Linux, rootless user namespaces, bubblewrap with read-only overlays,
 iproute2 and nftables. External TCP and DNS use the configured proxy; external
@@ -89,30 +90,71 @@ fn execute(mut arguments: Vec<OsString>) -> Result<i32, String> {
         print!("{HELP}");
         return Ok(0);
     };
-    match text(command)? {
-        "--help"|"-h" if arguments.len()==1 => { print!("{HELP}"); Ok(0) },
-        "--version"|"-V" if arguments.len()==1 => { println!("envwrap {}",crate::tool_version()); Ok(0) },
-        "profile" => profile(&arguments[1..]),
-        "claude" => {
-            arguments[0]="claude".into();
-            runtime::run(&Store::from_env()?.load(&selected)?,&arguments)
-        },
-        "run" if arguments.get(1).is_some_and(|arg|arg=="--") && arguments.len()>2 => runtime::run(&Store::from_env()?.load(&selected)?,&arguments[2..]),
-        "doctor" if arguments.len()==1 => {
-            let profile=Store::from_env()?.load(&selected)?;
+    match command.to_str() {
+        Some("--help" | "-h") if arguments.len() == 1 => {
+            print!("{HELP}");
+            Ok(0)
+        }
+        Some("--version" | "-V") if arguments.len() == 1 => {
+            println!("envwrap {}", crate::tool_version());
+            Ok(0)
+        }
+        Some("profile") => profile(&arguments[1..]),
+        Some("doctor") => {
+            if arguments.len() != 1 {
+                return Err("usage: envwrap [--profile NAME] doctor".into());
+            }
+            let profile = Store::from_env()?.load(&selected)?;
             identity::preflight(&profile)?;
             runtime::Dependencies::find()?;
-            println!("profile: {selected} (schema {})",profile.version);
-            println!("direct exceptions: host loopback{}",if profile.network.direct.is_empty(){String::new()}else{format!(", {}",profile.network.direct.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))});
-            for rule in &profile.network.internal_dns {println!("direct DNS: {} -> {}",rule.suffix,rule.resolver);}
+            println!("profile: {selected} (schema {})", profile.version);
+            println!(
+                "direct exceptions: host loopback{}",
+                if profile.network.direct.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", {}",
+                        profile
+                            .network
+                            .direct
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            );
+            for rule in &profile.network.internal_dns {
+                println!("direct DNS: {} -> {}", rule.suffix, rule.resolver);
+            }
             println!("external UDP: blocked; inherited HOME/config/Unix sockets: preserved");
-            let status=runtime::run(&profile,&[std::env::current_exe().map_err(|e|e.to_string())?.into(),"--internal-probe".into()])?;
-            if status!=0 {return Err(format!("runtime diagnostics failed ({status})"));}
-            println!("Claude authenticated conversation/MCP/hooks: not exercised by doctor");
+            let status = runtime::run(
+                &profile,
+                &[
+                    std::env::current_exe().map_err(|e| e.to_string())?.into(),
+                    "--internal-probe".into(),
+                ],
+            )?;
+            if status != 0 {
+                return Err(format!("runtime diagnostics failed ({status})"));
+            }
+            println!(
+                "Application-specific sessions: not exercised; independent environment acceptance is the release gate"
+            );
             Ok(0)
-        },
-        "run" => Err("usage: envwrap [--profile NAME] run -- PROGRAM [ARGS...]".into()),
-        _ => Err("unknown command or unsupported option; run envwrap --help (old environment/sandbox commands were removed)".into()),
+        }
+        Some("--") => {
+            if arguments.len() == 1 {
+                return Err("a program is required after --".into());
+            }
+            runtime::run(&Store::from_env()?.load(&selected)?, &arguments[1..])
+        }
+        Some(option) if option.starts_with('-') => Err(
+            "unknown envwrap option; put application options after PROGRAM, or use -- PROGRAM"
+                .into(),
+        ),
+        _ => runtime::run(&Store::from_env()?.load(&selected)?, &arguments),
     }
 }
 fn profile(arguments: &[OsString]) -> Result<i32, String> {

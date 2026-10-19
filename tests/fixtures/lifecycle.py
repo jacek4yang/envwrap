@@ -43,7 +43,7 @@ with socket.socket(socket.AF_UNIX) as stream:
     stream.sendall(b'ready')
 time.sleep(60)
 '''
-        child = subprocess.Popen([binary, 'run', '--', '/usr/bin/python3', '-c', code, str(path)], env=env,
+        child = subprocess.Popen([binary, '/usr/bin/python3', '-c', code, str(path)], env=env,
                                  cwd=workspace, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         runtime_directories = set()
         try:
@@ -100,7 +100,7 @@ assert input()=='interactive-input'
 print('INPUT-OK',flush=True)
 time.sleep(60)
 '''
-    argv = [binary, 'run', '--', '/usr/bin/python3', '-c', code]
+    argv = [binary, '/usr/bin/python3', '-c', code]
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(workspace)

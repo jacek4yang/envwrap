@@ -2,9 +2,9 @@
 
 ## 状态与边界
 
-`0.3.0-rc.1` 是首个 GitHub 预发布版本：破坏性代码切换、本地全量回归及 release 二进制 smoke 已完成。**尚未达到完整生产验收门槛**：真实 Claude 登录后的对话、恢复及 MCP/hooks/插件/skills/OAuth 仍待操作者授权验收。预发布资产用于受控试用，不自动覆盖已安装入口。安装入口见 [README](../README.md)，发布资产与流程见[维护与发布](releasing.md)。
+当前开发版本 `0.3.0` 采用通用 `envwrap PROGRAM` 入口，最终门槛为[独立环境与网络验收](acceptance.md)。Claude 登录/模型对话不是环境保护的证明，也不再是发布前提。本地验收通过后提供操作者测试；按操作者要求，确认之前不发布新 GitHub Release 或 crates.io 包。历史 `v0.3.0-rc.1` 保持不变。
 
-目标：`envwrap claude` 使用原生 Claude 的 HOME、登录、配置、插件、skills、MCP、hooks、项目、PATH 和工具链，仅增加明确声明的网络路由和容器身份视图。
+目标：`envwrap PROGRAM` 使用原程序的 HOME、登录、配置、扩展、项目、PATH 和工具链，仅增加明确声明的网络路由和容器身份视图。`envwrap claude`、`envwrap codex`、`envwrap agy` 都遵循相同规则。
 
 不提供：所有遥测内容控制、HTTPS 解密/改写、Claude 二进制修改、实体机伪装、独立 Claude HOME、文件安全沙箱、恶意同用户进程防护。正常遥测与应用现有设置保持不变。账号、请求内容、客户端版本及服务端判断不由 envwrap 决定。
 
@@ -21,7 +21,7 @@ cargo build --release --locked
 ./target/release/envwrap --help
 ```
 
-完成下述验收后再执行 `cargo install --path . --locked` 更新用户级入口。目前未自动更新已安装版本。
+独立验收通过后可用 `cargo install --path . --locked` 安装用户级入口；安装不修改原应用配置。首次使用前配置 profile 并在实际代理下运行 doctor。
 后文的 `envwrap` 指新二进制。验收阶段请把它替换为 `./target/release/envwrap`，避免误用 PATH 中的旧版本。
 
 
@@ -41,19 +41,19 @@ envwrap profile create default \
 envwrap doctor
 envwrap claude
 envwrap claude --resume
-envwrap run -- git fetch
+envwrap git fetch
 ```
 
 以上时区、locale、DNS 只是示例，必须改成你明确选择的值。`locale -a` 查看已安装 locale；不存在的 locale 或 TZif 时区文件会拒绝启动。代理必须允许到所选 DNS 服务的 TCP 连接。每次启动先验证这条 CONNECT/SOCKS 路径，不进行 GeoIP 查询，不发送应用数据。`doctor` 另发一个根域 NS 查询，验证实际 DNS 策略的完整链路：默认走代理 TCP DNS，显式内部后缀 `.` 则走相应受信直连解析器。
 
-`--profile NAME` 必须在 `claude` / `run` / `doctor` 前。例如：
+`--profile NAME` 必须在程序名或管理命令之前。例如：
 
 ```sh
 envwrap --profile work claude --help
-envwrap --profile work run -- python3 script.py
+envwrap --profile work python3 script.py
 ```
 
-`claude` 后所有参数原样交给 Claude；不吞掉 `--help`、`--version`、`--resume`。应用参数和环境值支持非 UTF-8，不做变量插值，不加额外 shell。
+任意程序名后的所有参数原样交给程序；不吞掉 `--help`、`--version`、`--resume`。程序路径、参数和环境值支持非 UTF-8，不做变量插值，不加额外 shell。`profile`、`doctor` 是保留管理名，使用 `envwrap -- PROGRAM` 可转义。
 
 ## Profile
 
@@ -104,7 +104,7 @@ TLS 原样穿过代理；应用自行使用 DoH/DoT 时，其连接仍按 TCP �
 
 子程序 IPv4/IPv6 TCP loopback listener 自动发布到宿主相同 loopback 地址/端口，用于浏览器 OAuth 和本机开发回调。通配地址 listener 只发布到宿主相应地址族的 loopback，不自动扩大为宿主 LAN 暴露；IPv6 listener 不额外假定 IPv4 双栈语义。
 
-这是 listener 发现与转发，不是 bind/listen 系统调用拦截：发现轮询间隔为 50 ms，实际可见时间受调度/控制链路影响，刚 listen 后立即从宿主连接存在短暂竞态。宿主端口冲突使会话失败，不转发到已有的其它服务。UDP 服务不提供反向端口发布。此边界必须在真实 Claude OAuth/本机服务验收中确认，不能描述为完全相同的宿主网络 namespace。
+这是 listener 发现与转发，不是 bind/listen 系统调用拦截：发现轮询间隔为 50 ms，实际可见时间受调度/控制链路影响，刚 listen 后立即从宿主连接存在短暂竞态。宿主端口冲突使会话失败，不转发到已有的其它服务。UDP 服务不提供反向端口发布。独立回调测试覆盖可用路径；不能描述为与共享宿主网络完全等价，实际应用可补充体验检查。
 
 ## 身份支持矩阵
 
@@ -155,19 +155,16 @@ cargo build --release --locked
 
 release 二进制另经实际运行验证非 UTF-8 argv/env、字面量 `${HOME}` 不展开、二进制 stdin/stdout/stderr 和退出码传递；临时 smoke 脚本与测试 profile 已清理。
 
-真实 Claude Code **2.1.302**：原生与 `envwrap claude` 的 `--version`、`--help` 输出/状态相同；认证状态同为 `loggedIn: false / authMethod: none / apiProvider: firstParty`。strace 的 openat 路径观察确认同一实际 HOME/Claude 配置来源，未读取凭据内容。不能把一致的未登录状态当成对话能力验收。
+历史 RC 阶段曾对真实 Claude Code 2.1.302 做原生/包装的版本、帮助、认证状态和配置访问路径对照。该记录仅是应用兼容性证据，不证明闭源遥测，也不构成新验收标准的强制项。
 
-剩余外部前提：
+当前最终验收直接运行普通程序，核对声明字段与 profile、有意继承字段与宿主、受控网络端点与故障行为。新增独立 host/child 观测覆盖 syscalls/procfs/sysfs、DMI 别名、冬夏时区、namespace/capabilities、CPU/内存/磁盘/用户配置；可选参考 checker 的离线字段交叉核对已实际执行。详情和报告格式见[独立验收](acceptance.md)。
 
-1. 操作者显式选择真实代理来源变量、DNS、时区与已安装 locale，完成有效 schema 2 profile。现有用户 profile 不会静默迁移；首次验收主机的旧 `default` 未通过新 schema 校验，不属于可用的发布示例。
-2. 操作者在原生 Claude 中完成登录，并授权一次真实对话、恢复、退出及 MCP stdio/HTTP、hooks、插件、skills、OAuth/本机服务专项验收。不索要或输出密钥。
-3. 根据真实场景确认上述回调端口发现竞态/协议边界可接受；不能宣称与共享宿主网络完全等价。
+实际部署仍须提供有效 profile、已安装的时区/locale、可用代理及目标程序。`doctor` 检查该部署的真实链路。应用登录由原应用管理，envwrap 不代为登录，不索要用户密钥。
 
-全部验收通过后才建议替换用户级日常入口并宣布生产就绪。本次发布不自动覆盖操作者已安装的旧版程序。
+## 当前切换与历史
 
-## 0.3.0-rc.1 变更
-
-- 删除旧环境 import/export/check/wrap 拼装、公开文件 sandbox、独立 HOME、环境白名单、强制遥测禁用与整个 telemetry-lab 产品及失效测试。
-- 单一运行引擎服务 `run` 和 `claude`，仅保留 profile CRUD 与 doctor；schema 2 要求显式配置，不保留旧接口兼容壳。
-- 网络改为 rootless 内核 REDIRECT/TPROXY + 宿主 broker；没有 TUN、TLS 中间人或自制 TCP/IP 栈依赖。
-- 身份采用可识别的 Linux 容器视图，支持矩阵代替“所有遥测由我们决定”的承诺。
+- 旧 import/export/check/wrap、公开文件 sandbox、独立 HOME、环境白名单、强制遥测禁用和 telemetry-lab 已移除。
+- 通用 `PROGRAM` 启动取代 RC 的 `run --` / Claude 专用分支；profile CRUD 与 doctor 保留。
+- rootless 内核 REDIRECT/TPROXY + 宿主 broker；没有 TUN、TLS 中间人或自制 TCP/IP 栈依赖。
+- 可识别的 Linux 容器身份与明确支持矩阵，不承诺“所有遥测由我们决定”。
+- 发布历史与当前未发布变更见 [CHANGELOG](../CHANGELOG.md)。

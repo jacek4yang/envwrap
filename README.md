@@ -4,24 +4,26 @@
 
 ```sh
 envwrap claude
-envwrap run -- git fetch
+envwrap codex
+envwrap agy
+envwrap git fetch
 ```
 
-`envwrap claude` 不管理另一套 Claude 安装或账号，不创建独立 HOME。它沿用原来的 Claude 配置、登录来源、项目、PATH 和工具链，在外层建立明确的网络路径和 Linux 容器身份视图。
+`envwrap PROGRAM [ARGS...]` 启动 PATH 中的任意程序。**Claude、Codex、agy 都不是 envwrap 子命令，没有专用分支。** envwrap 不代为安装应用、不创建独立 HOME、不替换账号配置；仅增加明确的网络路径和一组一致的 Linux 容器身份接口。
 
-**首个 Release：`v0.3.0-rc.1`，预发布版。** 本地网络、身份、终端与开发工具回归已通过；真实 Claude 登录后的对话、恢复及 MCP/hooks/插件/skills/OAuth 尚未完成专项验收。可以按下文受控试用，不把 RC 当成已经认证的生产稳定版。
+当前开发版本 **0.3.0**：已改为通用入口和独立环境/网络验收，等待操作者本机测试确认后发布到 GitHub 与 crates.io。已发布的历史版本 `v0.3.0-rc.1` 不修改；其命令面与当前版本不同。本文介绍当前源码版本。
 
 ## 文档导航
 
 | 文档 | 内容 |
 | --- | --- |
-| [运行与隐私边界](docs/runtime.md) | 流量策略、身份支持矩阵、继承内容、能力与限制、已有验证证据 |
-| [配置参考](docs/configuration.md) | 完整命令面、schema 2、代理来源、DNS/LAN 规则、身份生命周期、旧版迁移 |
-| [架构讲解](docs/architecture.md) | 启动流程、内核转发、宿主 broker、DNS、回调、信号、模块分工 |
-| [故障排查](docs/troubleshooting.md) | 配置、依赖、代理、DNS、locale、端口冲突、Claude 原生对照 |
-| [维护与发布](docs/releasing.md) | 测试、构建、打包、校验和、版本与发布流程 |
-| [版本记录](CHANGELOG.md) | 破坏性变更、修复和已知限制 |
-| [首版发布说明](docs/releases/v0.3.0-rc.1.md) | 此次发布范围、安装资产、验收状态 |
+| [独立验收标准](docs/acceptance.md) | 最终发布门槛、checker 交叉检测、逐项判定与证据 |
+| [运行与隐私边界](docs/runtime.md) | 流量策略、身份矩阵、继承内容、权限与限制 |
+| [配置参考](docs/configuration.md) | 命令、schema 2、代理来源、DNS/LAN、身份生命周期 |
+| [架构讲解](docs/architecture.md) | namespace、内核转发、broker、DNS、回调与进程管理 |
+| [故障排查](docs/troubleshooting.md) | 配置、依赖、代理、DNS、locale、应用兼容性 |
+| [维护与发布](docs/releasing.md) | 验证、源码/二进制打包、GitHub 与 crates.io 发布 |
+| [版本记录](CHANGELOG.md) | 当前变化与历史发布 |
 
 ## 能保证什么，不能保证什么
 
@@ -29,24 +31,22 @@ envwrap run -- git fetch
 | --- | --- |
 | 普通应用及其子进程的对外 IPv4/IPv6 TCP | 经指定 HTTP CONNECT 或 SOCKS5 代理，不依赖应用读取代理变量 |
 | 默认 UDP/TCP DNS | 受控处理，经代理向指定 DNS 服务发送 TCP 查询 |
-| 不支持的对外 UDP，例如 QUIC/HTTP3 | 阻断，不改为直连；应用是否回退到 TCP 由应用决定 |
-| localhost、明确配置的 LAN、内部 DNS、文件路径 Unix socket | 受信例外；详见运行边界，不宣称全部经过代理 |
-| hostname、machine-id、时区、locale、MAC、声明的 DMI 接口 | profile / 真实 namespace 提供一致视图 |
-| OS、内核、CPU、内存、磁盘基底、原应用配置 | 保留，不伪造执行能力 |
+| 不支持的对外 UDP，例如 QUIC/HTTP3 | 阻断，不直连；应用是否回退 TCP 由应用自身决定 |
+| localhost、明确配置的 LAN/内部 DNS、文件路径 Unix socket | 受信例外，不宣称全部经过代理 |
+| hostname、machine-id、时区、locale、MAC、声明 DMI 接口 | 按 profile / 真实 namespace 提供一致视图 |
+| OS、内核、CPU、内存、磁盘基底、原应用配置 | 保留，不伪造系统能力 |
 | HTTPS 正文、账号、请求内容、服务端判断、任意应用遥测 | 不解密、不改写、不承诺控制 |
 
-网络后端失败不会自动退回宿主外网直连。代理凭据不会通过默认子环境或辅助程序 argv 传递，但这不是防止恶意同用户程序读取配置文件或调试进程的安全沙箱。
+网络后端失败不会自动退回宿主外网直连。这不是不可信程序的文件安全沙箱，也不防止恶意同用户程序读取用户文件或调试进程。
 
-## 1. 准备运行环境
+## 1. 依赖
 
-- Linux；首个二进制资产为 **x86_64 GNU/Linux**。
+- Linux；发布打包路径目前验证的是 x86_64 GNU/Linux。
 - 普通用户可用的 user/mount/net/pid/UTS namespaces。
-- `bwrap`（bubblewrap，必须支持 `--ro-overlay`；已验证版本 0.11.1）、`ip`（iproute2）、`nft`（nftables）。
+- `bwrap`：必须支持 `--ro-overlay`，已验证 bubblewrap 0.11.1。
+- `ip`（iproute2）、`nft`（nftables）。
 - 内核支持 IPv6、dummy 接口、REDIRECT/TPROXY、sysfs 和只读 overlay。
-- 已安装你选择的时区与 locale。
-- Claude Code 自行安装；直接运行 `claude --version` 应能找到它。
-
-依赖安装属于系统管理员操作；**envwrap 日常启动不用 sudo，也不会修改宿主防火墙/sysctl/安全策略**。仅安装软件包不代表发行版策略一定允许这些功能，以 `doctor` 的实际启动结果为准。
+- 已安装所选时区和 locale；目标应用自行安装并在 PATH 中。
 
 ```sh
 bwrap --version
@@ -54,58 +54,36 @@ bwrap --help
 ip -Version
 nft --version
 locale -a
-claude --version
 ```
 
-旧版 bubblewrap 没有 `--ro-overlay` 时，请先安装发行版支持的新版；不要通过关闭整个系统安全策略来掩盖启动失败。
+系统依赖/locale 安装可能需要管理员权限；**envwrap 日常运行不用 sudo，不修改宿主防火墙、sysctl 或安全策略**。依赖不满足时失败，不绕过保护继续启动。
 
-## 2. 安装或并行试用
+## 2. 安装当前待测版本
 
-### 从 GitHub Release 下载
-
-仓库目前为私有仓库，需要具有访问权限的 GitHub 登录。使用 GitHub CLI：
+在当前源码目录中：
 
 ```sh
-gh release download v0.3.0-rc.1 --repo jacek4yang/envwrap \
-  --pattern 'envwrap-v0.3.0-rc.1-x86_64-unknown-linux-gnu.tar.gz' \
-  --pattern 'SHA256SUMS' --dir envwrap-download
-cd envwrap-download
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf envwrap-v0.3.0-rc.1-x86_64-unknown-linux-gnu.tar.gz
-./envwrap-v0.3.0-rc.1-x86_64-unknown-linux-gnu/envwrap --version
+cargo install --path . --locked
+hash -r
+command -v envwrap
+envwrap --version
 ```
 
-首版 GNU 二进制的最高 GLIBC 符号需求为 **GLIBC_2.39**，还需要 `libgcc_s.so.1`。这只是链接器要求，不代表已在每个 glibc ≥ 2.39 的发行版测试过。构建环境、精确提交、依赖库、二进制哈希在包内 `BUILD-INFO.json`；发行版/内核能力仍须本机诊断。不支持该二进制的主机请从源码构建，不要替换系统 libc。
+已验证工具链为 Rust 1.98.1，使用 edition 2024 和 `Cargo.lock`。存在多个 envwrap 安装时，以 PATH 顺序为准。升级前保留旧二进制和私有配置备份。
 
-可先保留旧入口，将候选版本安装为另一个名字：
+**仅在 0.3.0 正式发布到 crates.io 后**，其它机器可执行：
 
 ```sh
-install -Dm755 envwrap-v0.3.0-rc.1-x86_64-unknown-linux-gnu/envwrap \
-  "$HOME/.local/bin/envwrap-rc"
-"$HOME/.local/bin/envwrap-rc" --help
+cargo install envwrap --version 0.3.0 --locked
 ```
 
-### 从源码构建
+也可以从相应 GitHub Release 下载二进制与 `SHA256SUMS`。GNU 二进制的 libc 要求以该包的 `BUILD-INFO.json` 为准；之前的 RC 包最高 GLIBC 符号需求为 2.39，不能当作通用静态二进制。仓库当前为私有，GitHub 下载需要访问权限；未来 crates.io 包是公开的。
 
-```sh
-git clone git@github.com:jacek4yang/envwrap.git
-cd envwrap
-git checkout v0.3.0-rc.1
-cargo build --release --locked
-./target/release/envwrap --help
-```
+## 3. 显式配置
 
-已验证工具链为 Rust 1.98.1。项目使用 edition 2024 和锁定的 `Cargo.lock`；本发布不声称验证了更低的 Rust 最低版本，也不提供未经验证的 musl/ARM 二进制。
+首次运行不自动创建 profile，不查询 GeoIP，不猜测你的出口城市。
 
-后文使用 `envwrap` 作为命令名。并行试用时，将它替换为 `envwrap-rc` 或 `./target/release/envwrap`。
-
-## 3. 显式配置，随后启动
-
-首次运行不会自动生成 profile，也不会查询 GeoIP 或猜测你的出口国家。
-
-### 安全设置代理来源
-
-在 Bash 中交互输入完整代理 URL，避免 URL 进入 shell 历史和命令行参数：
+以 Bash 为例，安全输入代理 URL，避免写进命令历史：
 
 ```sh
 read -r -s -p 'Proxy URL: ' EGRESS_PROXY
@@ -113,80 +91,81 @@ printf '\n'
 export EGRESS_PROXY
 ```
 
-支持 `http://`、`socks5://`、`socks5h://`。代理端点当前必须是 IP 字面量，例如本机代理客户端的 `socks5://127.0.0.1:1080`。IPv6 使用方括号。HTTP CONNECT/SOCKS5 本身不提供链路加密；远程链路保密应由受信的加密隧道客户端解决。
+支持 `http://`、`socks5://`、`socks5h://`，代理端点须为 IP 字面量，例如 `socks5://127.0.0.1:10808`。IPv6 端点使用方括号。HTTP CONNECT/SOCKS5 自身不加密代理认证或链路；远程链路保密需要受信的加密隧道客户端。
 
-### 创建 profile
-
-下面的 DNS、时区和 locale **只是明确的示例值**。请根据实际出口和已经安装的 locale 自行选择；`C.UTF-8` 是 UTF-8 基础 locale，不代表某个国家。
+下面示例明确选择洛杉矶时区、美国英语和一个默认 DNS。请按实际需要选择，不是运行时自动推断：
 
 ```sh
 envwrap profile create default \
   --proxy-env EGRESS_PROXY \
   --dns 1.1.1.1:53 \
-  --timezone Europe/Berlin \
-  --locale C.UTF-8
+  --timezone America/Los_Angeles \
+  --locale en_US.UTF-8
 
 envwrap doctor
 envwrap claude
 ```
 
-`doctor` 成功表示配置和相应运行路径通过了诊断，不等于完成 Claude 真实会话验收。若没有登录，请先在**原生 Claude** 中通过官方流程登录，再用同一 HOME 启动包装版本；不要把登录凭据交给 envwrap。
+`en_US.UTF-8` 必须真实安装。没有“洛杉矶专属语言”；这里选择美国英语，洛杉矶时区会按时区数据库自动处理冬夏令时。**设置时区/语言不会改变代理真实出口 IP 或其地理位置。**
 
-已有旧 `default` 配置时，创建不同名称，避免覆盖：
+如果不想每次导出代理变量，可在私有 TOML 的 `[network.proxy]` 中删去 `env`，改成：
 
-```sh
-envwrap profile create work-v2 \
-  --proxy-env EGRESS_PROXY --dns 1.1.1.1:53 \
-  --timezone Europe/Berlin --locale C.UTF-8
-
-envwrap --profile work-v2 doctor
-envwrap --profile work-v2 claude
+```toml
+[network.proxy]
+url = "socks5://127.0.0.1:10808"
 ```
 
-代理变量只在当前 shell 导出；下次启动前要重新安全设置，或按[配置参考](docs/configuration.md)把 URL 存进私有 profile。不会自动读取其它 ambient 代理作为备用。
+这是配置片段，不是完整 profile。文件保持 `0600`，不提交仓库。配置位置、其它字段与备份方式见[配置参考](docs/configuration.md)。已有旧 `default` 时先备份，或创建 `work-v2` 并用 `--profile work-v2` 选择；创建命令不会覆盖旧文件。
 
-## 4. 日常命令
+## 4. 通用命令规则
 
 ```sh
-envwrap claude --help
-envwrap claude --version
 envwrap claude --resume
-envwrap run -- git fetch
-envwrap run -- python3 your_program.py
+envwrap codex --help
+envwrap agy
+envwrap git fetch
+envwrap python3 your_program.py
+envwrap --profile work-v2 claude --version
 
-envwrap --profile work-v2 claude --resume
-envwrap profile list
-envwrap profile show work-v2
+# profile 和 doctor 是 envwrap 保留管理命令。
+# 如果真正要运行的程序恰好叫 doctor，用 -- 转义：
+envwrap -- doctor --help
 ```
 
-- envwrap 的 `--profile` 放在 `claude` / `run` / `doctor` 前。
-- `claude` 后的所有参数属于 Claude，原样传递；不会吞掉 Claude 自己的 `--help`。
-- `run` 必须使用 `--` 分隔程序和参数。不做变量插值，不隐式加 shell。
-- 同一 profile 跨启动稳定，跨程序共享身份；它不是 HOME/账号分区。
-- 进程组、标准流与交互终端保留；会话结束时结束其中的后代进程，不用于启动脱离会话的守护程序。
-- `profile show` 隐去代理 URL 与 seed，输出不是可回填的配置备份。
+- envwrap 的选项必须放在程序名前，例如 `--profile work-v2`。
+- 程序名后所有参数属于程序，包括 `--help`、`--version`、`--profile`，不再重新解析。
+- `--` 不是普通程序启动的必需项；它用于转义保留名或以 `-` 开头的可执行路径。
+- 支持非 UTF-8 程序路径与参数；不做变量插值，不加隐式 shell。
+- `run` 不再是 envwrap 子命令。旧 `envwrap run -- git ...` 改为 `envwrap git ...`。
+- 找不到目标应用会失败，不自动安装，也不退回未保护启动。
 
-## 5. 把候选版本切换为日常入口前
-
-至少完成：
-
-1. 真实代理下 `doctor` 成功。
-2. Claude 真实对话、流式输出、退出、`--resume` 正常，且没有重复登录或另一套配置。
-3. 你实际使用的 MCP stdio/HTTP、hooks、插件、skills、Git/SSH agent 正常。
-4. OAuth/localhost 回调正常；接受 50 ms 间隔端口发现带来的短暂竞态和明确的协议例外。
-5. 确认[隐私支持范围](docs/runtime.md)，而不是把它当成全部遥测可控或恶意程序隔离。
-
-验证通过后再安装为正常入口，并检查 PATH 中实际生效的版本：
+管理配置：
 
 ```sh
-# 在源码目录内；会更新 Cargo 管理的用户级二进制。
-cargo install --path . --locked
-hash -r
-command -v envwrap
-envwrap --version
+envwrap profile list
+envwrap profile show default
+envwrap profile create work-v2 --help
+envwrap --profile work-v2 doctor
 ```
 
-如果同时存在 `~/.local/bin/envwrap` 和 `~/.cargo/bin/envwrap`，以 PATH 顺序为准，不要仅凭安装成功判断正在使用哪个版本。保留旧二进制用于回滚；schema 2 profile 不会自动兼容旧程序。
+同一 profile 跨启动稳定、跨程序共享身份；不是 HOME 或账号分区。`show` 隐去 URL 和 seed，不能作为可回填的配置备份。
+
+## 5. 独立环境验收，而不是依赖 Claude 闭源内部
+
+最终验收标准为 `envwrap-independent-v1`：独立程序通过系统调用、procfs/sysfs、文件和真实 socket 观测运行环境，再按明确支持范围判断。**不以 Claude 登录、一次对话或外部 checker 的风险分数为零作为发布门槛。**
+
+```sh
+cargo build --release --locked
+python3 -B scripts/acceptance.py --binary target/release/envwrap
+
+# 可选：用已有 checker 交叉核对；只读离线扫描，不修改那个项目。
+python3 -B scripts/acceptance.py --binary target/release/envwrap \
+  --reference-checker "$HOME/Projects/claude-code-env-checker/target/release/claude-code-env-checker"
+```
+
+环境、TCP/DNS/UDP、故障不直连、终端/信号/进程树、真实 Git/SSH agent 仍是强制验收项。继承项与缺失的条件性接口单独标记，不把 `NOT_EXECUTED` 当作通过。详细矩阵、报告隐私和本机使用前检查见[独立验收标准](docs/acceptance.md)。
+
+闭源应用的对话与扩展可以由操作者补充体验测试，不能据此证明其全部遥测行为。使用前仍应针对**自己配置的代理**运行 `doctor`，确认原应用已安装且有正常登录/配置；登录由应用官方流程处理，envwrap 不索要账号密钥。
 
 ## 开发与许可证
 
@@ -194,8 +173,9 @@ envwrap --version
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets -- --nocapture
+python3 -B scripts/package_release.py --check-docs
 ```
 
-全量测试还需要 Python 3.11+、setpriv、Git、OpenSSH ssh-agent/ssh-add；测试使用隔离的本地端点，不访问公网、不读用户账号密钥。完整发布流程见[维护与发布](docs/releasing.md)。
+测试需要 Python 3.11+、setpriv、Git、OpenSSH ssh-agent/ssh-add 及运行依赖。测试新建隔离网络和临时 HOME/profile，不访问公网或真实账号，不改变用户的实际 profile。
 
 [MIT License](LICENSE)。

@@ -73,6 +73,10 @@ locale -a
 
 doctor 不是对所有目标地址、代理规则或 Claude 服务的可达性证明。目标可能被上游代理拒绝，服务可能不可用，TLS/账号也可能失败。保存脱敏的错误类型与具体发生阶段，不上传认证头或请求正文。
 
+如果强制 IPv4 的 HTTPS 请求成功，而默认地址族或 IPv6 请求出现 TLS EOF/reset，应对照检查代理的 IPv6 出站能力。原生 SOCKS5 对照必须使用同一个目标 IPv6 地址并保留原始 TLS SNI；只把域名交给 SOCKS5 解析，代理可能选择 IPv4，不能据此证明 IPv6 可用。
+
+透明 TCP 转发的本地握手可能早于上游连接完成。上游 IPv6 失败可能表现为连接后的 EOF/reset，应用的 Happy Eyeballs 不一定会再尝试 IPv4。envwrap 不会自动过滤 AAAA、关闭 IPv6 或绕过代理。`curl -4` 只能帮助定位问题，不是通用修复；应修复代理的 IPv6 路径，并重新验证实际应用。
+
 ### QUIC、游戏或其它 UDP 应用不工作
 
 当前只代理外部 TCP；外部非 DNS UDP 被阻断，不实现 SOCKS5 UDP ASSOCIATE。应用支持 TCP 时可由它自行回退；不支持则不属于当前兼容范围。不要承诺全部 UDP 都会通过 SOCKS5。
@@ -109,16 +113,15 @@ envwrap --profile work-v2 claude --help
 
 如果父进程被 SIGKILL，可能留下用户私有 `/tmp/envwrap-*` 文件。确认对应会话已结束、目录属于你且确实由该次运行创建后再删除；不要用通配符批量删除其他正在运行会话的目录。进程终止保证不依赖删除这些目录。
 
-## 生产使用前的人工验收记录
+## 部署检查与可选应用体验记录
 
-只记录结果与脱敏信息，不提交秘密配置：
+发布门槛见[独立验收标准](acceptance.md)，不要求 Claude 登录或付费对话。部署到自己的机器后，应记录：
 
-- envwrap、Claude、bwrap 版本，Linux 架构与 libc 信息；
-- 所选 profile 名、代理协议、是否有内部 DNS/LAN 例外，不记录认证 URL；
-- doctor 结果；
-- 一次真实对话与流式响应、正常退出、会话恢复；
-- 实际 MCP stdio/HTTP、hooks、插件、skills、Git 与 SSH agent；
-- 实际 OAuth/localhost 回调及端口冲突处理；
-- 是否接受文档中的网络/身份边界。
+- envwrap、bwrap、目标应用版本，架构与 libc；
+- profile 名、代理协议及声明例外，不记录认证 URL；
+- 实际代理下的 doctor 结果与支持范围；
+- 可选的原应用对话、恢复、MCP/hooks/插件/skills 或 OAuth 体验结果，未执行时保持未执行。
 
-没有完成这些项目时，RC 仍是受控试用，不应把“二进制能运行”当作生产认证。
+普通程序使用 `envwrap PROGRAM ARGS`；`claude`、`codex` 等不是专用子命令。目标程序未安装时先通过其官方方式安装，不把 PATH 缺失当作代理问题。若程序名与管理命令冲突，使用 `envwrap -- doctor` 这样的显式转义。
+
+独立检测不证明闭源请求正文或服务端行为；也不能用“checker 分数为零”替代真实网络验证。用户要求先测试再发布时，仍应等待明确的测试确认。
